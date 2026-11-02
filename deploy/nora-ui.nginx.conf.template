@@ -6,6 +6,11 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Création de règles réservée aux appels directs avec jeton : jamais via le tableau de bord.
+    location ^~ /api/rules {
+        return 403;
+    }
+
     # /api/* -> backend interne (le préfixe /api est conservé, routes FastAPI sous /api).
     location /api/ {
         proxy_pass http://nora-api:8000;
