@@ -22,6 +22,9 @@ def test_find_last_pay():
     ]
     assert C.find_last_pay(inc, RULE, today) == date(2026, 10, 28)
     assert C.find_last_pay(inc, RULE, date(2026, 12, 20)) is None           # > 45 jours
+    one = [{"date": "2026-10-01", "amount": 2000, "payee": "employeur"}]
+    assert C.find_last_pay(one, RULE, date(2026, 11, 15)) == date(2026, 10, 1)   # 45 j
+    assert C.find_last_pay(one, RULE, date(2026, 11, 16)) is None                # 46 j
 
 
 def test_remaining_charges():
@@ -29,7 +32,7 @@ def test_remaining_charges():
     charges = [
         {"name": "Loyer", "amount": 700, "freq": "monthly", "start": "2026-01", "end": None, "day": 3},
         {"name": "Assurance", "amount": 40, "freq": "monthly", "start": "2026-01", "end": None, "day": 15},
-        {"name": "Ancien", "amount": 90, "freq": "monthly", "start": "2025-01", "end": "2026-10"},
+        {"name": "Ancien", "amount": 90, "freq": "monthly", "start": "2025-01", "end": "2026-09", "day": 12},
         {"name": "Trimestre", "amount": 300, "freq": "quarterly", "start": "2026-11", "end": None},
     ]
     w = [
@@ -37,7 +40,7 @@ def test_remaining_charges():
         {"date": "2026-11-04", "amount": -40.0, "payee": "assurance"},      # <= 0 ignorée
     ]
     assert C.remaining_charges(charges, start, end, w) == [
-        {"name": "Assurance", "amount": 40, "day": 15}]
+        {"name": "Assurance", "amount": 40, "day": 15, "due": date(2026, 11, 15)}]
 
 
 def test_remaining_charges_match_and_tolerance():
@@ -83,3 +86,41 @@ def test_quality():
     assert C.quality(2, 0.79, True) == "incertaine"
     assert C.quality(2, 0.8, False) == "incertaine"
     assert C.quality(2, 0.8, True) == "fiable"
+
+
+S, E = date(2026, 10, 28), date(2026, 11, 30)
+
+
+def _ch(name="Abo", amount=30, day=30, **kw):
+    return {"name": name, "amount": amount, "freq": "monthly", "start": "2026-01", "end": None, "day": day, **kw}
+
+
+def test_charge_due_twice_in_cycle():
+    w = [{"date": "2026-10-30", "amount": 30.0, "payee": "abo"}]
+    r = C.remaining_charges([_ch()], S, E, w)
+    assert [x["due"] for x in r] == [date(2026, 11, 30)]
+
+
+def test_day_5_only_november():
+    r = C.remaining_charges([_ch(day=5)], S, E, [])
+    assert [x["due"] for x in r] == [date(2026, 11, 5)]
+
+
+def test_charge_ending_in_start_month_unpaid_counts():
+    r = C.remaining_charges([_ch(end="2026-10")], S, E, [])
+    assert [x["due"] for x in r] == [date(2026, 10, 30)]
+
+
+def test_one_withdrawal_settles_one_charge():
+    ch = [_ch("Assur A", 40, 10, match="assur"), _ch("Assur B", 45, 10, match="assur")]
+    w = [{"date": "2026-11-10", "amount": 42.0, "payee": "ASSUR"}]
+    assert len(C.remaining_charges(ch, S, E, w)) == 1
+
+
+def test_undated_charge_one_occurrence():
+    r = C.remaining_charges([_ch(day=None)], S, E, [])
+    assert len(r) == 1 and r[0]["due"] is None
+
+
+def test_available_clamps_days_left():
+    assert C.available(1000, [], {"x": 10.0}, -5, 0)["available"] == 1000.0

@@ -10,6 +10,7 @@ import forecast
 
 PAY_WINDOW_DAYS = 45
 CHARGE_TOLERANCE = 0.15
+MATCH_DAYS = 10
 MIN_CYCLES = 2
 MIN_COVERAGE = 0.80
 
@@ -37,30 +38,68 @@ def cycle_bounds(today, last_pay):
     return last_pay, _eom(last_pay + timedelta(days=10))
 
 
-def remaining_charges(charges, start, end, withdrawals):
-    # Activité décidée sur le mois de fin de cycle (mois de la paie attendue).
-    month = f"{end.year}-{end.month:02d}"
+def _months(start, end):
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        yield y, m
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+
+def _occurrences(c, start, end):
+    """Échéances de la charge dans [start, end] ; sans `day`, une seule échéance
+    prudente (due=None) si la charge est active sur au moins un mois du cycle."""
+    day = c.get("day")
     out = []
-    for c in charges:
-        if c.get("freq", "monthly") != "monthly" or not forecast.active_obligations([c], month):
+    for y, m in _months(start, end):
+        if not forecast._active(c, f"{y}-{m:02d}"):
             continue
+        if day is None:
+            return [None]
+        due = date(y, m, min(day, calendar.monthrange(y, m)[1]))
+        if start <= due <= end:
+            out.append(due)
+    return out
+
+
+def remaining_charges(charges, start, end, withdrawals):
+    occs = []
+    for c in charges:
+        if c.get("freq", "monthly") != "monthly":
+            continue
+        occs += [(due, c) for due in _occurrences(c, start, end)]
+    occs.sort(key=lambda o: (o[0] is None, o[0] or start, o[1]["name"]))
+    pool = [(_d(w["date"]), w["amount"], w.get("payee", "").lower()) for w in withdrawals
+            if w["amount"] > 0 and start <= _d(w["date"]) <= end]
+    out = []
+    for due, c in occs:
         needle = (c.get("match") or c["name"]).lower()
         lo, hi = c["amount"] * (1 - CHARGE_TOLERANCE), c["amount"] * (1 + CHARGE_TOLERANCE)
-        paid = any(w["amount"] > 0 and start <= _d(w["date"]) <= end
-                   and needle in w.get("payee", "").lower() and lo <= w["amount"] <= hi
-                   for w in withdrawals)
-        if not paid:
-            out.append({"name": c["name"], "amount": c["amount"], "day": c.get("day")})
+        best = None
+        for i, (wd, amt, payee) in enumerate(pool):
+            if needle not in payee or not lo <= amt <= hi:
+                continue
+            gap = abs((wd - due).days) if due else 0
+            if due and gap > MATCH_DAYS:
+                continue
+            key = (gap, abs(amt - c["amount"]))
+            if best is None or key < best[0]:
+                best = (key, i)
+        if best:
+            pool.pop(best[1])  # une sortie ne solde qu'une échéance
+        else:
+            out.append({"name": c["name"], "amount": c["amount"], "day": c.get("day"), "due": due})
     return out
 
 
 def daily_rates(cycles):
+    # Non arrondi : l'arrondi se fait sur les produits dans available().
     cats = {k for c in cycles for k, v in c["by_category"].items() if v > 0}
-    return {k: round(median(max(c["by_category"].get(k, 0), 0) / c["days"] for c in cycles), 2)
+    return {k: median(max(c["by_category"].get(k, 0), 0) / c["days"] for c in cycles)
             for k in sorted(cats)}
 
 
 def available(balance, charges_left, rates, days_left, margin):
+    days_left = max(days_left, 0)
     left = round(sum(c["amount"] for c in charges_left), 2)
     var = {k: round(r * days_left, 2) for k, r in rates.items()}
     return {"available": round(balance - left - sum(var.values()) - margin, 2),
