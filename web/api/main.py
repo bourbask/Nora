@@ -416,7 +416,9 @@ def api_unclassified():
     ws = [w for w in fc.withdrawals_between(start, today) if not w["category"]
           and w["amount"] > 0 and not cycle.is_charge(w, charges)]
     ws.sort(key=lambda w: w["date"], reverse=True)
-    return [{"id": w["id"], "date": w["date"], "payee": finance_alerts._clean(w["payee"]),
+    # le libellé est le champ que le déclencheur de règle inspecte
+    return [{"id": w["id"], "date": w["date"], "payee": finance_alerts._clean(
+                 " ".join(w["description"].split()) or w["payee"]),
              "amount": w["amount"]} for w in ws[:UNCLASSIFIED_MAX]]
 
 

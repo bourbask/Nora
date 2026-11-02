@@ -462,3 +462,13 @@ def test_unknown_source_deposit_matches_pay_rule(monkeypatch):
     assert inc[0]["payee"] == "VIR EMPLOYEUR SA VIREMENT"
     assert cycle.pay_dates(inc, {"payee_contains": "EMPLOYEUR", "min_amount": 0}) \
         == [date(2026, 11, 1)]
+
+
+def test_unclassified_payee_is_description(client):
+    WITHDRAWALS.append({**_w("c9", "2026-11-02", 5.0, "ENSEIGNE A"),
+                        "description": "CARTE 03/07  ENSEIGNE B VILLE"})
+    try:
+        j = client.get("/api/unclassified").json()
+    finally:
+        WITHDRAWALS.pop()
+    assert [u["payee"] for u in j if u["id"] == "c9"] == ["CARTE 03/07 ENSEIGNE B VILLE"]
