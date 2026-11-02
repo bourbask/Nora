@@ -59,6 +59,25 @@ sync_provider() {
     fi
 }
 
+# Sources directes : une configuration d'import par source, stockée sur l'hôte
+# (importer/config/import_config_<source>.json, gitignoré), exécutée par l'outil
+# d'import en ligne de commande. Les doublons signalés sont un succès : l'outil
+# dédoublonne sur external_id.
+IMPORTER_CONTAINER="${IMPORTER_CONTAINER:-firefly-iii-importer}"
+sync_direct() {
+    local cfg="$1" name; name="$(basename "$cfg" .json)"; name="${name#import_config_}"
+    echo "→ $name: import direct"
+    local out
+    out=$(docker exec "$IMPORTER_CONTAINER" php artisan importer:import "/config/$(basename "$cfg")" 2>&1 || true)
+    local real_errors
+    real_errors=$(echo "$out" | grep -E 'production\.ERROR|Exception' \
+        | grep -viE 'already a transaction|Exit code is GENERAL_ERROR|already exists|Failed to create account' || true)
+    if [ -n "$real_errors" ] || ! grep -q 'Done!' <<<"$out"; then
+        log_event "$name" import_failed; notify "NORA" "$name : import échoué"; return 1
+    fi
+    log_event "$name" import_completed; echo "  ok"
+}
+
 echo "=== auto-sync $(date -u +%FT%TZ) ==="
 rc=0
 if [ -d "$PROVIDERS_DIR" ]; then
@@ -68,4 +87,8 @@ if [ -d "$PROVIDERS_DIR" ]; then
         sync_provider "$dir" || rc=1
     done
 fi
+for cfg in "$PROJECT_DIR"/importer/config/import_config_*.json; do
+    [ -f "$cfg" ] || continue
+    sync_direct "$cfg" || rc=1
+done
 exit $rc
