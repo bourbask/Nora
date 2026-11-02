@@ -10,4 +10,5 @@ COMPOSE="docker compose -f docker-compose.yml -f docker-compose.vps.yml"
 
 tar czf - -C "$ROOT" --exclude-vcs-ignores --exclude=.git . \
   | ssh "$VPS_HOST" "mkdir -p '$NORA_DIR' && tar xzf - -C '$NORA_DIR'"
-ssh "$VPS_HOST" "cd '$NORA_DIR' && $COMPOSE pull --ignore-buildable && $COMPOSE up -d --build"
+# Code de l'API monté depuis l'hôte, sans rechargement : redémarrage explicite.
+ssh "$VPS_HOST" "cd '$NORA_DIR' && $COMPOSE pull --ignore-buildable && $COMPOSE up -d --build && $COMPOSE restart nora-api"
