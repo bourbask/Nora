@@ -445,9 +445,9 @@ def _tx(kind, name, desc):
 
 def test_payee_from_description_when_counterparty_unknown(monkeypatch):
     monkeypatch.setattr(fc, "api_get", lambda p, params=None: _tx(
-        "withdrawal", "(unknown destination)", "PRLV  SURAVENIR ASSURANCES AUTO\n10/2026-123 "))
+        "withdrawal", "(unknown destination)", "PRLV  ASSUREUR EXEMPLE AUTO\n10/2026-123 "))
     w = fc.withdrawals_between(date(2026, 11, 1), date(2026, 11, 2))
-    assert w[0]["payee"] == "PRLV SURAVENIR ASSURANCES AUTO 10/2026-123"
+    assert w[0]["payee"] == "PRLV ASSUREUR EXEMPLE AUTO 10/2026-123"
 
 
 def test_payee_keeps_real_destination(monkeypatch):
