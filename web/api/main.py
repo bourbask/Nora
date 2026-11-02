@@ -7,7 +7,10 @@ receives aggregate JSON. All data logic lives in firefly_client.py.
 Run (dev):  uvicorn main:app --reload --port 8068   (from web/api/)
 """
 
+import calendar
+import math
 import os
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -18,6 +21,9 @@ from pydantic import BaseModel, Field, model_validator
 
 import alerts as alerts_mod
 import amortization
+import budget
+import cycle
+import finance_alerts
 import drift
 import firefly_client as fc
 import import_status
@@ -165,6 +171,223 @@ def api_categorization(month: str | None = None):
     cov = categorization.coverage(cats)
     top = categorization.top_untagged(fc.untagged_withdrawals(month), 5)
     return {"month": month, **cov, "top_untagged": top}
+
+
+# ── cycle de paie, enveloppes, alertes de dérapage, classement ───────────────
+
+STALE_AFTER = timedelta(hours=48)
+
+
+def _today():
+    return date.today()
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def last_sync():
+    """Horodatage du dernier import réussi (toutes sources), None si inconnu."""
+    text = AUTO_SYNC_LOG.read_text() if AUTO_SYNC_LOG.exists() else ""
+    ts = [v["timestamp"] for v in import_status.last_per_source(text).values()
+          if v.get("event") == "import_completed" and v.get("timestamp")]
+    return max(ts) if ts else None
+
+
+def _stale(ts):
+    if ts is None:
+        return True
+    try:
+        t = datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return _now() - t > STALE_AFTER
+
+
+def _budget_cfg(cfg):
+    b = cfg.get("budget")
+    if not b:
+        raise HTTPException(503, "Bloc « budget » absent de la configuration : "
+                                 "cycle, enveloppes et alertes indisponibles.")
+    return b
+
+
+def _balance(name):
+    bal = fc.account_balance(name)
+    if bal is None:
+        raise HTTPException(503, f"Compte « {name} » introuvable dans le registre.")
+    return bal
+
+
+def _cycle_state(cfg):
+    b = _budget_cfg(cfg)
+    today = _today()
+    ex = {e.lower() for e in cfg.get("transfer_categories", [])}
+    charges = cfg.get("dormant", {}).get("recurring_charges", [])
+    postes = b.get("postes", [])
+
+    pay = cycle.find_last_pay(fc.incomes_since(cycle.PAY_WINDOW_DAYS), b["pay"], today)
+    start, end = cycle.cycle_bounds(today, pay)
+    ws = fc.withdrawals_between(start, today)
+    spending = [w for w in ws if w["category"].lower() not in ex]
+    by_cat = {}
+    for w in spending:
+        if w["category"]:
+            by_cat[w["category"]] = by_cat.get(w["category"], 0) + w["amount"]
+    total = sum(w["amount"] for w in spending)
+    coverage = round(sum(by_cat.values()) / total, 4) if total else 1.0
+
+    history = fc.cycles_history(b.get("reference_cycles", 6), b["pay"], ex, charges)
+    rates = cycle.daily_rates(history)
+    # coussin et comptes investis jamais comptés dans le disponible
+    cushion = b["cushion"]
+    excluded = {cushion["account"], *cfg.get("invested", {}).get("accounts", [])}
+    balance = sum(_balance(a) for a in b.get("accounts", []) if a not in excluded)
+    charges_left = cycle.remaining_charges(charges, start, end, ws)
+    days_left = (end - today).days
+    avail = cycle.available(balance, charges_left, rates, days_left, b.get("margin_eur", 0))
+
+    cushion_bal = _balance(cushion["account"])
+    m = budget.mode(cushion_bal, cushion["floor_eur"])
+    env = budget.envelopes(rates, (end - start).days + 1, postes, m)
+    spent = budget.spent_in_cycle(by_cat, postes)
+    ts = last_sync()
+    return {
+        "cfg": b, "postes": postes, "today": today, "start": start, "end": end,
+        "days_left": days_left, "mode": m, "rates": rates, "avail": avail,
+        "charges_left": charges_left, "envelopes": env, "spent": spent,
+        "cushion_balance": cushion_bal, "ws": ws, "charges": charges,
+        "quality": cycle.quality(len(history), coverage, pay is not None),
+        "basis": {"pay_date": pay.isoformat() if pay else None,
+                  "complete_cycles": len(history),
+                  "reference_period": [_iso(history[0]["start"]), _iso(
+                      history[-1]["start"] + timedelta(days=history[-1]["days"] - 1))]
+                  if history else None,
+                  "coverage": coverage},
+        "last_sync": ts, "stale": _stale(ts),
+    }
+
+
+def _iso(d):
+    return d.isoformat() if d else None
+
+
+def _meta(st):
+    return {"quality": st["quality"], "stale": st["stale"], "last_sync": st["last_sync"]}
+
+
+def _amount(amount):
+    if not math.isfinite(amount) or amount <= 0:
+        raise HTTPException(422, "Le montant doit être un nombre fini strictement positif.")
+    return amount
+
+
+def _poste(postes, poste):
+    names = [p["name"] for p in postes]
+    if poste not in names:
+        raise HTTPException(422, f"Poste inconnu « {poste} ». Postes valides : {', '.join(names)}.")
+    return next(p for p in postes if p["name"] == poste)
+
+
+@app.get("/api/cycle")
+def api_cycle():
+    st = _cycle_state(load_cfg())
+    return {
+        "start": st["start"].isoformat(), "end": st["end"].isoformat(),
+        "today": st["today"].isoformat(), "days_left": st["days_left"], "mode": st["mode"],
+        **_meta(st), "basis": st["basis"], "available": st["avail"],
+        "charges_left": [{**c, "due": _iso(c["due"])} for c in st["charges_left"]],
+        "envelopes": st["envelopes"], "spent": st["spent"],
+        "cushion": {"balance": st["cushion_balance"], "floor": st["cfg"]["cushion"]["floor_eur"]},
+    }
+
+
+@app.get("/api/cycle/afford")
+def api_cycle_afford(amount: float, poste: str | None = None):
+    _amount(amount)
+    cfg = load_cfg()
+    if poste is not None:
+        _poste(_budget_cfg(cfg).get("postes", []), poste)
+    st = _cycle_state(cfg)
+    left = {k: round(v - st["spent"].get(k, 0), 2) for k, v in st["envelopes"].items()}
+    return {**budget.can_afford(st["avail"], amount, poste, st["mode"], left, st["postes"]),
+            "available": st["avail"]["available"], **_meta(st)}
+
+
+@app.get("/api/cycle/save")
+def api_cycle_save(amount: float):
+    _amount(amount)
+    st = _cycle_state(load_cfg())
+    return {**budget.can_save(st["avail"], amount), "available": st["avail"]["available"],
+            **_meta(st)}
+
+
+@app.get("/api/envelopes")
+def api_envelopes():
+    st = _cycle_state(load_cfg())
+    nxt = st["end"] + timedelta(days=1)
+    days = calendar.monthrange(nxt.year, nxt.month)[1]
+    return {"days": days, "mode": st["mode"],
+            "envelopes": budget.envelopes(st["rates"], days, st["postes"], st["mode"]),
+            **_meta(st)}
+
+
+@app.get("/api/finance-alerts")
+def api_finance_alerts():
+    st = _cycle_state(load_cfg())
+    b, today = st["cfg"], st["today"]
+    cushion = b["cushion"]
+    # épargne mensuelle du coussin estimée sur trois mois
+    before = fc.account_balance(cushion["account"], today - timedelta(days=91))
+    monthly = (st["cushion_balance"] - before) / 3 if before is not None else 0
+    eta = budget.ceiling_eta(st["cushion_balance"], cushion["ceiling_eur"], monthly) \
+        if cushion.get("ceiling_eur") else None
+    unexpected = [w for w in st["ws"]
+                  if not w["category"] and not cycle.is_charge(w, st["charges"])]
+    consent = b.get("consent_expires")
+    if isinstance(consent, str):
+        consent = date.fromisoformat(consent)
+    return {"alerts": finance_alerts.build(
+        st["start"], st["avail"], st["envelopes"], st["spent"], st["postes"], unexpected,
+        consent, today, eta, cushion.get("warn_months", 3),
+        unexpected_min=b.get("unexpected_min_eur", 100.0)), **_meta(st)}
+
+
+UNCLASSIFIED_MAX = 20
+
+
+@app.get("/api/unclassified")
+def api_unclassified():
+    cfg = load_cfg()
+    b = _budget_cfg(cfg)
+    today = _today()
+    pay = cycle.find_last_pay(fc.incomes_since(cycle.PAY_WINDOW_DAYS), b["pay"], today)
+    start, _ = cycle.cycle_bounds(today, pay)
+    ws = [w for w in fc.withdrawals_between(start, today) if not w["category"] and w["amount"] > 0]
+    ws.sort(key=lambda w: w["date"], reverse=True)
+    return [{"id": w["id"], "date": w["date"], "payee": finance_alerts._clean(w["payee"]),
+             "amount": w["amount"]} for w in ws[:UNCLASSIFIED_MAX]]
+
+
+class RuleBody(BaseModel):
+    payee: str
+    poste: str
+
+
+@app.post("/api/rules")
+def api_rules(body: RuleBody):
+    payee = body.payee.strip()
+    if not 1 <= len(payee) <= 100:
+        raise HTTPException(422, "Le payee doit compter entre 1 et 100 caractères.")
+    p = _poste(_budget_cfg(load_cfg()).get("postes", []), body.poste)
+    rule_id = fc.find_rule(payee, p["category"])
+    created = rule_id is None
+    if created:
+        rule_id = fc.create_rule(payee, p["category"])
+    fc.trigger_rule(rule_id)
+    return {"rule_id": rule_id, "created": created, "applied": True}
 
 
 SNAPSHOTS_FILE = DATA_DIR / "snapshots.json"

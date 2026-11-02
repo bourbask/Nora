@@ -1,0 +1,259 @@
+"""Routes du cycle : registre simulé en mémoire, aucun réseau."""
+import os
+from datetime import date, datetime, timezone
+
+import pytest
+
+pytest.importorskip("fastapi")
+os.environ.setdefault("FIREFLY_TOKEN", "test")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import budget  # noqa: E402
+import firefly_client as fc  # noqa: E402
+import main  # noqa: E402
+
+TODAY = date(2026, 11, 2)
+
+CFG = {
+    "dormant": {
+        "accounts": ["Compte A", "Compte B"],
+        "checking_buffer_eur": 100, "target_savings_rate": 0.2, "safety_cushion_months": 6,
+        "recurring_charges": [
+            {"name": "Loyer", "match": "LOYER", "amount": 700, "day": 1,
+             "freq": "monthly", "start": "2024-01", "end": None, "kind": "rent"},
+            {"name": "Assurance", "match": "ASSUR", "amount": 50, "day": 15,
+             "freq": "monthly", "start": "2024-01", "end": None, "kind": "insurance"},
+        ],
+        "one_offs": [],
+    },
+    "invested": {"accounts": ["Compte C"]},
+    "transfer_categories": ["Virements"],
+    "budget": {
+        "pay": {"payee_contains": "EMPLOYEUR", "min_amount": 1000},
+        "accounts": ["Compte A"],
+        "margin_eur": 50,
+        "cushion": {"account": "Compte B", "floor_eur": 3000, "ceiling_eur": 20000,
+                    "warn_months": 3},
+        "postes": [
+            {"name": "restos", "category": "Restaurants", "compressible": True, "floor_eur": 0},
+            {"name": "courses", "category": "Courses", "compressible": False, "floor_eur": 0},
+            {"name": "essence", "category": "Carburant", "compressible": False, "floor_eur": 0},
+        ],
+        "reference_cycles": 6,
+        "consent_expires": None,
+    },
+}
+
+INCOMES = [{"date": f"2026-{m:02d}-28", "amount": 2000.0, "payee": "EMPLOYEUR SA"}
+           for m in (7, 8, 9, 10)] + [
+    {"date": "2026-10-30", "amount": 50.0, "payee": "REMBOURSEMENT"}]
+
+
+def _w(id_, d, amount, payee, category=""):
+    return {"id": id_, "date": d, "amount": amount, "payee": payee, "category": category,
+            "description": payee}
+
+
+WITHDRAWALS = []
+for i, (s, e) in enumerate((("2026-07", "2026-08"), ("2026-08", "2026-09"),
+                            ("2026-09", "2026-10"))):
+    WITHDRAWALS += [_w(f"h{i}a", f"{s}-29", 300.0, "SUPERMARCHE", "Courses"),
+                    _w(f"h{i}b", f"{s}-30", 62.0, "STATION", "Carburant"),
+                    _w(f"h{i}c", f"{e}-01", 700.0, "LOYER", "Logement"),
+                    _w(f"h{i}d", f"{e}-05", 500.0, "VERS EPARGNE", "Virements")]
+WITHDRAWALS += [_w("c1", "2026-10-30", 40.0, "SUPERMARCHE", "Courses"),
+                _w("c2", "2026-10-31", 150.0, "MAGASIN"),
+                _w("c3", "2026-11-01", 705.0, "LOYER", "Logement"),
+                _w("c4", "2026-11-01", 20.0, "STATION", "Carburant"),
+                _w("c5", "2026-11-02", 12.5, "BOULANGERIE")]
+
+BALANCES = {"Compte A": 500.0, "Compte B": 5000.0, "Compte C": 9000.0}
+
+
+class FakeRegistry:
+    """Règles et groupes de règles du registre, en mémoire."""
+
+    def __init__(self):
+        self.groups, self.rules, self.triggered = [], [], []
+
+    def get(self, path, params=None):
+        items = {"/rule-groups": self.groups, "/rules": self.rules}[path]
+        return {"data": items, "meta": {"pagination": {"total_pages": 1}}}
+
+    def post(self, path, data, params=None):
+        if path == "/rule-groups":
+            g = {"id": str(len(self.groups) + 1), "attributes": {"title": data["title"]}}
+            self.groups.append(g)
+            return {"data": g}
+        if path == "/rules":
+            r = {"id": str(len(self.rules) + 1), "attributes": data}
+            self.rules.append(r)
+            return {"data": r}
+        self.triggered.append((path, params))
+        return {}
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    log = tmp_path / "auto_sync.log"
+    log.write_text('{"timestamp":"2026-11-01T06:00:00Z","source":"banque","event":"import_completed","transactions":3}\n')
+    reg = FakeRegistry()
+    monkeypatch.setattr(main, "load_cfg", lambda: CFG)
+    monkeypatch.setattr(main, "AUTO_SYNC_LOG", log)
+    monkeypatch.setattr(main, "_today", lambda: TODAY)
+    monkeypatch.setattr(main, "_now", lambda: datetime(2026, 11, 2, 8, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(fc, "incomes_since", lambda days: INCOMES)
+    monkeypatch.setattr(fc, "withdrawals_between", lambda s, e: [
+        w for w in WITHDRAWALS if s <= date.fromisoformat(w["date"]) <= e])
+    monkeypatch.setattr(fc, "account_balance", lambda name, on_date=None: BALANCES.get(name))
+    monkeypatch.setattr(fc, "api_get", reg.get)
+    monkeypatch.setattr(fc, "api_post", reg.post)
+    c = TestClient(main.app)
+    c.registry, c.log = reg, log
+    return c
+
+
+def test_cycle_days_left_and_quality(client):
+    r = client.get("/api/cycle")
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["start"], j["end"], j["today"]) == ("2026-10-28", "2026-11-30", "2026-11-02")
+    assert j["days_left"] == 28
+    assert j["mode"] == "serein"
+    assert j["stale"] is False and j["last_sync"] == "2026-11-01T06:00:00Z"
+    assert j["quality"] == "fiable"
+    assert j["basis"]["complete_cycles"] == 3
+    assert j["basis"]["reference_period"] == ["2026-07-28", "2026-10-27"]
+    # loyer déjà prélevé (705 ≈ 700) ; assurance restante, échéance sérialisée
+    assert j["charges_left"] == [{"name": "Assurance", "amount": 50, "day": 15,
+                                  "due": "2026-11-15"}]
+    # courses médiane 300/31 j, carburant 62/31 j ; loyer et virements exclus des rythmes
+    a = j["available"]
+    assert set(a["variable_expected"]) == {"Courses", "Carburant"}
+    assert a["variable_expected"]["Carburant"] == 56.0
+    assert a["available"] == round(500 - 50 - a["variable_expected"]["Courses"] - 56 - 50, 2)
+    assert j["spent"] == {"restos": 0, "courses": 40.0, "essence": 20.0}
+    assert j["cushion"] == {"balance": 5000.0, "floor": 3000}
+
+
+def test_cycle_stale_after_48h(client):
+    client.log.write_text('{"timestamp":"2026-10-31T07:00:00Z","source":"banque","event":"import_completed","transactions":1}\n')
+    assert client.get("/api/cycle").json()["stale"] is True
+    client.log.write_text("")
+    j = client.get("/api/cycle").json()
+    assert j["stale"] is True and j["last_sync"] is None
+
+
+def test_afford_reflects_can_afford(client):
+    j = client.get("/api/cycle").json()
+    left = {k: round(j["envelopes"][k] - j["spent"][k], 2) for k in j["envelopes"]}
+    postes = CFG["budget"]["postes"]
+    for amount in (70, 80):
+        r = client.get(f"/api/cycle/afford?amount={amount}&poste=essence")
+        assert r.status_code == 200
+        got = r.json()
+        want = budget.can_afford(j["available"], amount, "essence", "serein", left, postes)
+        assert {k: got[k] for k in want} == want
+        assert got["quality"] == "fiable" and got["stale"] is False
+    assert client.get("/api/cycle/afford?amount=70&poste=essence").json()["ok"] is True
+    no = client.get("/api/cycle/afford?amount=80&poste=essence").json()
+    assert no["ok"] is False and no["cuts"]
+
+
+@pytest.mark.parametrize("q", ["amount=0", "amount=-5", "amount=nan", "amount=inf",
+                               "amount=10&poste=inconnu"])
+def test_afford_rejects_bad_input(client, q):
+    r = client.get(f"/api/cycle/afford?{q}")
+    assert r.status_code == 422
+    if "poste" in q:
+        assert "essence" in r.json()["detail"]
+
+
+def test_save(client):
+    avail = client.get("/api/cycle").json()["available"]["available"]
+    assert client.get(f"/api/cycle/save?amount={avail}").json()["ok"] is True
+    j = client.get(f"/api/cycle/save?amount={avail + 1}").json()
+    assert j["ok"] is False and "quality" in j and "stale" in j
+    assert client.get("/api/cycle/save?amount=0").status_code == 422
+
+
+def test_envelopes_next_cycle(client):
+    j = client.get("/api/envelopes").json()
+    assert j["days"] == 31 and j["mode"] == "serein"  # décembre
+    assert j["envelopes"]["essence"] == 62.0
+
+
+def test_missing_budget_is_503(client, monkeypatch):
+    monkeypatch.setattr(main, "load_cfg", lambda: {k: v for k, v in CFG.items() if k != "budget"})
+    for path in ("/api/cycle", "/api/envelopes", "/api/finance-alerts", "/api/unclassified"):
+        r = client.get(path)
+        assert r.status_code == 503 and "budget" in r.json()["detail"]
+
+
+def test_finance_alerts_unexpected(client):
+    alerts = client.get("/api/finance-alerts").json()["alerts"]
+    kinds = [a["kind"] for a in alerts]
+    assert "unexpected" in kinds and "negative" not in kinds
+    un = [a for a in alerts if a["kind"] == "unexpected"]
+    assert len(un) == 1 and "MAGASIN" in un[0]["details"]
+
+
+def test_unclassified(client):
+    j = client.get("/api/unclassified").json()
+    assert j == [{"id": "c5", "date": "2026-11-02", "payee": "BOULANGERIE", "amount": 12.5},
+                 {"id": "c2", "date": "2026-10-31", "payee": "MAGASIN", "amount": 150.0}]
+
+
+def test_rules_idempotent(client):
+    r1 = client.post("/api/rules", json={"payee": "  MAGASIN ", "poste": "courses"})
+    assert r1.status_code == 200
+    j1 = r1.json()
+    assert j1["created"] is True and j1["applied"] is True
+    r2 = client.post("/api/rules", json={"payee": "MAGASIN", "poste": "courses"}).json()
+    assert r2 == {"rule_id": j1["rule_id"], "created": False, "applied": True}
+    reg = client.registry
+    assert len(reg.rules) == 1 and len(reg.groups) == 1
+    rule = reg.rules[0]["attributes"]
+    assert rule["triggers"][0]["value"] == "MAGASIN"
+    assert rule["actions"][0] == {"type": "set_category", "value": "Courses",
+                                  "stop_processing": False, "active": True}
+    path, params = reg.triggered[-1]
+    assert path == f"/rules/{j1['rule_id']}/trigger"
+    assert date.fromisoformat(params["start"]) <= date.fromisoformat(params["end"]).replace(
+        year=date.fromisoformat(params["end"]).year - 1)
+
+
+@pytest.mark.parametrize("body", [{"payee": "X", "poste": "inconnu"},
+                                  {"payee": "   ", "poste": "courses"},
+                                  {"payee": "x" * 101, "poste": "courses"}])
+def test_rules_rejects_bad_input(client, body):
+    assert client.post("/api/rules", json=body).status_code == 422
+    assert client.registry.rules == []
+
+
+def test_cycles_history(monkeypatch):
+    monkeypatch.setattr(fc, "incomes_since", lambda days: INCOMES + [
+        {"date": "2026-10-02", "amount": 1500.0, "payee": "EMPLOYEUR SA"}])  # prime proche
+    monkeypatch.setattr(fc, "withdrawals_between", lambda s, e: [
+        w for w in WITHDRAWALS if s <= date.fromisoformat(w["date"]) <= e])
+    h = fc.cycles_history(2, CFG["budget"]["pay"], exclude=["virements"],
+                          charges=CFG["dormant"]["recurring_charges"])
+    assert [c["days"] for c in h] == [31, 30]
+    assert h[-1]["by_category"] == {"Courses": 300.0, "Carburant": 62.0}
+
+
+# capturé sur le code antérieur aux routes du cycle
+REMAINING_SNAPSHOT = {"ref_month": "2026-11", "reste_a_vivre": 400.0, "reste_a_investir": 0.0}
+
+
+def test_remaining_unchanged(monkeypatch):
+    monkeypatch.setattr(main, "load_cfg", lambda: CFG)
+    monkeypatch.setattr(fc, "_now_month", lambda: "2026-11")
+    monkeypatch.setattr(fc, "monthly_income_series", lambda ref, n=6: [2000.0] * 6)
+    monkeypatch.setattr(fc, "typical_monthly_expense", lambda ref, months=6: 1600.0)
+    monkeypatch.setattr(fc, "asset_accounts", lambda on_date=None: [
+        {"name": k, "balance": v} for k, v in BALANCES.items()])
+    r = TestClient(main.app).get("/api/remaining")
+    assert r.status_code == 200
+    assert r.json() == REMAINING_SNAPSHOT

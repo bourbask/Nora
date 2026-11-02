@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 
+import cycle
 import forecast as F
 
 FIREFLY_BASE_URL = os.environ.get("FIREFLY_BASE_URL", "http://localhost:8066")
@@ -51,12 +52,12 @@ def api_get(path, params=None):
         return r.json()
 
 
-def api_post(path, data):
+def api_post(path, data, params=None):
     url = f"{FIREFLY_BASE_URL}/api/v1{path}"
     with httpx.Client() as c:
-        r = c.post(url, headers=_headers(), json=data, timeout=30)
+        r = c.post(url, headers=_headers(), json=data, params=params, timeout=30)
         r.raise_for_status()
-        return r.json()
+        return r.json() if r.content else {}
 
 
 def api_put(path, data):
@@ -276,6 +277,124 @@ def untagged_withdrawals(month):
             break
         page += 1
     return out
+
+
+def _pages(path, params=None):
+    """Éléments de toutes les pages d'une liste paginée du registre."""
+    page = 1
+    while True:
+        data = api_get(path, {**(params or {}), "limit": 200, "page": page})
+        yield from data.get("data", [])
+        pag = data.get("meta", {}).get("pagination", {})
+        if page >= pag.get("total_pages", page):
+            return
+        page += 1
+
+
+def incomes_since(days):
+    """Entrées d'argent des `days` derniers jours. payee = source_name."""
+    start = (date.today() - timedelta(days=days)).isoformat()
+    out = []
+    for g in _pages("/transactions", {"type": "deposit", "start": start}):
+        for t in g["attributes"]["transactions"]:
+            amt = abs(float(t["amount"]))
+            if amt:
+                out.append({"date": t["date"][:10], "amount": amt,
+                            "payee": t.get("source_name") or "?"})
+    return out
+
+
+def withdrawals_between(start, end):
+    """Sorties de [start, end] avec catégorie ('' si non classée) et id du groupe."""
+    out = []
+    for g in _pages("/transactions", {"type": "withdrawal", "start": start.isoformat(),
+                                      "end": end.isoformat()}):
+        for t in g["attributes"]["transactions"]:
+            amt = abs(float(t["amount"]))
+            if amt:
+                out.append({"id": g["id"], "date": t["date"][:10], "amount": amt,
+                            "payee": t.get("destination_name") or "?",
+                            "category": t.get("category_name") or "",
+                            "description": t.get("description") or ""})
+    return out
+
+
+PAY_MIN_GAP_DAYS = 20
+
+
+def cycles_history(n, pay_rule, exclude=(), charges=()):
+    """Les `n` derniers cycles complets [paie, paie suivante) : dépense par
+    catégorie (catégories de virement et charges fixes exclues), longueur en jours."""
+    needle = pay_rule["payee_contains"].lower()
+    pays = []
+    for d in sorted(date.fromisoformat(i["date"]) for i in incomes_since(31 * (n + 1) + 31)
+                    if i["amount"] >= pay_rule["min_amount"] and needle in i["payee"].lower()):
+        if not pays or (d - pays[-1]).days >= PAY_MIN_GAP_DAYS:
+            pays.append(d)  # un second versement proche (prime) n'ouvre pas de cycle
+    bounds = list(zip(pays, pays[1:]))[-n:] if n > 0 else []
+    if not bounds:
+        return []
+    ex = {e.lower() for e in exclude}
+    ws = withdrawals_between(bounds[0][0], bounds[-1][1] - timedelta(days=1))
+    out = []
+    for s, e in bounds:
+        by_cat = {}
+        for w in ws:
+            d = date.fromisoformat(w["date"])
+            if not s <= d < e or w["category"].lower() in ex or cycle.is_charge(w, charges):
+                continue
+            cat = w["category"] or "(sans catégorie)"
+            by_cat[cat] = round(by_cat.get(cat, 0) + w["amount"], 2)
+        out.append({"start": s, "days": (e - s).days, "by_category": by_cat})
+    return out
+
+
+def account_balance(name, on_date=None):
+    """Solde d'un compte d'actif, None si le compte est inconnu."""
+    return next((a["balance"] for a in asset_accounts(on_date) if a["name"] == name), None)
+
+
+RULE_GROUP = "Classement assistant"
+# Le payee exposé est le compte de destination : la règle teste ce même champ.
+RULE_TRIGGER = "destination_account_contains"
+
+
+def _rule_group_id():
+    for g in _pages("/rule-groups"):
+        if g["attributes"].get("title") == RULE_GROUP:
+            return g["id"]
+    return api_post("/rule-groups", {"title": RULE_GROUP})["data"]["id"]
+
+
+def find_rule(payee, category):
+    """Id d'une règle existante « payee ⇒ catégorie », sinon None."""
+    for r in _pages("/rules"):
+        a = r["attributes"]
+        if (any(t.get("type") == RULE_TRIGGER and (t.get("value") or "").lower() == payee.lower()
+                for t in a.get("triggers", []))
+                and any(x.get("type") == "set_category" and x.get("value") == category
+                        for x in a.get("actions", []))):
+            return r["id"]
+    return None
+
+
+def create_rule(payee, category):
+    return api_post("/rules", {
+        "title": f"Classement : {payee}"[:255],
+        "rule_group_id": _rule_group_id(),
+        "trigger": "store-journal", "active": True, "strict": True, "stop_processing": False,
+        "triggers": [{"type": RULE_TRIGGER, "value": payee,
+                      "stop_processing": False, "active": True}],
+        "actions": [{"type": "set_category", "value": category,
+                     "stop_processing": False, "active": True}],
+    })["data"]["id"]
+
+
+def trigger_rule(rule_id, days=400):
+    """Applique la règle aux opérations des `days` derniers jours."""
+    today = date.today()
+    api_post(f"/rules/{rule_id}/trigger", None, params={
+        "start": (today - timedelta(days=days)).isoformat(), "end": today.isoformat()})
 
 
 def _month_summary_row(month, cfg):

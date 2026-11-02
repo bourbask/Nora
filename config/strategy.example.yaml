@@ -19,7 +19,8 @@ dormant:
   savings_band_pts: 5             # +/- band (points) around target savings rate
   one_offs: []                    # dated one-time expenses {name, amount, date, kind}
   recurring_charges:              # dated obligation ledger (Firefly bills unused)
-    - {name: Example loan, amount: 300, freq: monthly, start: "2026-01", end: "2030-01", kind: loan, remaining_balance: 12000}
+    # optional: match = payee substring (default: name), day = usual debit day
+    - {name: Example loan, amount: 300, freq: monthly, start: "2026-01", end: "2030-01", kind: loan, remaining_balance: 12000, match: "LOAN", day: 5}
     - {name: Example rent, amount: 700, freq: monthly, start: "2024-01", end: null, kind: rent, remaining_balance: null}
 
 invested:
@@ -45,5 +46,19 @@ alerts:                           # enable-map for GET /api/alerts (absent block
   savings: true
   scores: true
   score_floor: 50                 # health-score alert threshold (0-100)
+
+budget:                           # pay cycle, available amount, envelopes (absent = routes 503)
+  pay: {payee_contains: "EMPLOYER", min_amount: 1000}
+  accounts: ["Bank - Checking"]   # counted in the available amount (cushion/invested never are)
+  margin_eur: 50
+  cushion: {account: "Bank - Savings", floor_eur: 3000, ceiling_eur: 20000, warn_months: 3}
+  postes:                         # list order = cut order (first trimmed first)
+    - {name: restos,  category: "Restaurants", compressible: true,  floor_eur: 0}
+    - {name: loisirs, category: "Loisirs",     compressible: true,  floor_eur: 0}
+    - {name: courses, category: "Courses",     compressible: false, floor_eur: 0}
+    - {name: essence, category: "Carburant",   compressible: false, floor_eur: 0}
+  reference_cycles: 6
+  unexpected_min_eur: 100
+  consent_expires: null           # "YYYY-MM-DD"
 
 transfer_categories: ["Virements", "Transfert", "Transfer", "Investissement", "Dépôts", "Espèces"]

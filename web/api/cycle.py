@@ -91,6 +91,15 @@ def remaining_charges(charges, start, end, withdrawals):
     return out
 
 
+def is_charge(w, charges):
+    """Sortie correspondant à une charge fixe (payee + montant à ±15 %) :
+    exclue des rythmes variables, déjà comptée dans les charges."""
+    payee = w.get("payee", "").lower()
+    return any((c.get("match") or c["name"]).lower() in payee
+               and abs(w["amount"] - c["amount"]) <= c["amount"] * CHARGE_TOLERANCE
+               for c in charges)
+
+
 def daily_rates(cycles):
     # Non arrondi : l'arrondi se fait sur les produits dans available().
     cats = {k for c in cycles for k, v in c["by_category"].items() if v > 0}
