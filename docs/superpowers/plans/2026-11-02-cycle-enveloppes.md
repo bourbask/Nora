@@ -17,7 +17,7 @@
 - Le compte coussin et tout compte d'investissement **ne comptent jamais** dans le disponible.
 - Données insuffisantes ⇒ `quality: "incertaine"` : moins de **2** cycles complets, part classée **< 0.80**, ou paie du cycle non reconnue.
 - Synchro de plus de **48 h** ⇒ `stale: true`.
-- Mode **reconstitution** si solde du coussin < seuil ; sinon **serein**. En reconstitution, aucune dépense d'un poste compressible au-delà de son enveloppe restante n'est validée.
+- Mode **reconstitution** si solde du coussin < seuil ; sinon **serein**. En reconstitution, aucune dépense d'un poste compressible au-delà de son enveloppe restante n'est validée, ni aucune dépense sans poste ; les postes non compressibles passent si le disponible suffit.
 - Toutes les valeurs personnelles dans `config/strategy.yaml` (gitignoré) ; `strategy.example.yaml` avec placeholders neutres.
 - Dépôt public : aucun nom de banque, d'agrégateur, de montant réel dans le code, les tests, les commentaires, les commits.
 - Les sorties existantes (`/api/remaining`, `/api/runway`, tableau de bord) ne changent pas.
