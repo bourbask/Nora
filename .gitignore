@@ -53,3 +53,6 @@ data-backup-precutover.sql.gz
 
 # dev server pids/logs
 .run/
+
+# Importer source credentials (host-only)
+importer/.importer.env
