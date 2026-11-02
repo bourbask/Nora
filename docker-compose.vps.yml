@@ -47,6 +47,7 @@ services:
     volumes:
       - ./web/ui/dist:/usr/share/nginx/html:ro
       - ./deploy/nora-ui.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/legal:/usr/share/nginx/legal:ro
     ports:
       # Boucle locale uniquement ; l'exposition au réseau privé est faite par l'hôte.
       - "127.0.0.1:49173:80"
