@@ -56,3 +56,6 @@ data-backup-precutover.sql.gz
 
 # Importer source credentials (host-only)
 importer/.importer.env
+
+# TLS host config (domain names, DNS API credentials)
+.caddy.env

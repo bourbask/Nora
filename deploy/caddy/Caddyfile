@@ -1,0 +1,27 @@
+# Noms et identifiants fournis par l'environnement de l'hôte (.caddy.env), jamais versionnés.
+{
+	email {$ACME_EMAIL}
+}
+
+(dns) {
+	tls {
+		dns ovh {
+			endpoint {$OVH_ENDPOINT}
+			application_key {$OVH_APPLICATION_KEY}
+			application_secret {$OVH_APPLICATION_SECRET}
+			consumer_key {$OVH_CONSUMER_KEY}
+		}
+	}
+}
+
+# Tableau de bord.
+{$NORA_HOST} {
+	import dns
+	reverse_proxy nora-ui:80
+}
+
+# Outil d'import (consentement bancaire et retour d'autorisation).
+{$NORA_SYNC_HOST} {
+	import dns
+	reverse_proxy data-importer:8080
+}

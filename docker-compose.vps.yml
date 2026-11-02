@@ -54,7 +54,29 @@ services:
       - nora-api
     networks: [nora-net]
 
+  # --- Terminaison TLS du réseau privé. Écoute la boucle locale uniquement ;
+  # l'hôte relaie le port 443 du réseau privé vers elle. ---
+  caddy:
+    build: ./deploy/caddy
+    container_name: nora-caddy
+    restart: unless-stopped
+    env_file:
+      - path: ./.caddy.env
+        required: true
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "127.0.0.1:${CADDY_BIND_PORT:-8443}:443"
+    depends_on:
+      - nora-ui
+      - data-importer
+    networks: [firefly-net, nora-net]
+
 networks:
   # Réseau partagé Nora <-> n8n. Créé ici (propriétaire) ; n8n le référence en external.
   nora-net:
     name: nora-net
+
+volumes:
+  caddy-data:
