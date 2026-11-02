@@ -18,7 +18,7 @@ services:
       retries: 5
 
   firefly-iii:
-    image: fireflyiii/core:version-6.1.21
+    image: fireflyiii/core:version-6.7.9
     container_name: firefly-iii
     restart: unless-stopped
     ports:
@@ -47,9 +47,13 @@ services:
       - firefly-net
 
   data-importer:
-    image: fireflyiii/data-importer:version-1.4.4
+    image: fireflyiii/data-importer:version-2.3.5
     container_name: firefly-iii-importer
     restart: unless-stopped
+    # Identifiants des sources de synchronisation : fichier local à l'hôte, jamais versionné.
+    env_file:
+      - path: ./importer/.importer.env
+        required: false
     ports:
       # bind localhost-only: never publish on 0.0.0.0 (public on a VPS).
       - "127.0.0.1:8067:8080"
@@ -64,7 +68,6 @@ services:
     volumes:
       - ./importer/config:/config
       - ./importer/imports:/imports
-      - ./importer/patches/PseudoTransactionProcessor.php:/var/www/html/app/Services/CSV/Conversion/Routine/PseudoTransactionProcessor.php
     depends_on:
       firefly-iii:
         condition: service_started
