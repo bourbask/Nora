@@ -10,7 +10,7 @@ OPEN = {("GET", "/api/health")}
 
 
 def _token() -> str:
-    return os.environ.get("NORA_API_TOKEN", "").strip()
+    return os.environ.get("NORA_API_TOKEN", "")  # sans espace : comparé tel quel
 
 
 @asynccontextmanager

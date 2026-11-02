@@ -62,7 +62,7 @@ Run the dashboard — see [`web/README.md`](web/README.md).
 
 ## Déploiement
 
-Après mise à jour : générer `NORA_API_TOKEN` (`openssl rand -hex 32`) dans `.env` AVANT de déployer, sinon l'API refuse de démarrer.
+Après mise à jour : générer `NORA_API_TOKEN` (`openssl rand -hex 32`) dans `.env` AVANT de déployer, sinon l'API refuse de démarrer. Le jeton ne doit contenir aucun espace.
 Toutes les routes exigent `Authorization: Bearer <jeton>` sauf `GET /api/health` ; le proxy du tableau de bord l'ajoute côté serveur.
 
 ## Status

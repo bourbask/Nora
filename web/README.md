@@ -22,6 +22,7 @@ npm install
 npm run dev        # http://localhost:5173  (proxifie /api -> :8068)
 ```
 
+L'API exige `NORA_API_TOKEN` (`make dev`/`api`/`ui` utilisent `dev` par défaut) ; le proxy Vite l'ajoute côté serveur.
 Le navigateur ne parle qu'à Vite (`:5173`) ; `/api/*` est proxifié vers FastAPI.
 En prod : nginx sert le build de `ui/` et proxifie `/api` vers `finance-api`
 (origine unique, pas de CORS) — Dockerfiles/compose à ajouter lors de la

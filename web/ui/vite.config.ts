@@ -11,6 +11,11 @@ export default defineConfig({
     port: 5173,
     // Same-origin trick in dev: browser talks to Vite, /api is proxied to the
     // FastAPI proxy. No CORS, token never reaches the browser.
-    proxy: { "/api": "http://localhost:8068" },
+    proxy: {
+      "/api": {
+        target: "http://localhost:8068",
+        headers: { Authorization: `Bearer ${process.env.NORA_API_TOKEN || "dev"}` },
+      },
+    },
   },
 });
