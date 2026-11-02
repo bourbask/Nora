@@ -9,6 +9,7 @@ from statistics import median
 import forecast
 
 PAY_WINDOW_DAYS = 45
+PAY_MIN_GAP_DAYS = 20
 CHARGE_TOLERANCE = 0.15
 MATCH_DAYS = 10
 MIN_CYCLES = 2
@@ -30,6 +31,18 @@ def find_last_pay(incomes, rule, today):
              and needle in i.get("payee", "").lower()
              and 0 <= (today - _d(i["date"])).days <= PAY_WINDOW_DAYS]
     return max(found) if found else None
+
+
+def pay_dates(incomes, rule, min_gap=PAY_MIN_GAP_DAYS):
+    """Dates de paie reconnues, triées ; un versement à moins de `min_gap` jours
+    du précédent (prime, régularisation) n'ouvre pas de cycle."""
+    needle = rule["payee_contains"].lower()
+    out = []
+    for d in sorted(_d(i["date"]) for i in incomes
+                    if i["amount"] >= rule["min_amount"] and needle in i.get("payee", "").lower()):
+        if not out or (d - out[-1]).days >= min_gap:
+            out.append(d)
+    return out
 
 
 def cycle_bounds(today, last_pay):

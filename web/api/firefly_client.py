@@ -319,18 +319,10 @@ def withdrawals_between(start, end):
     return out
 
 
-PAY_MIN_GAP_DAYS = 20
-
-
 def cycles_history(n, pay_rule, exclude=(), charges=()):
     """Les `n` derniers cycles complets [paie, paie suivante) : dépense par
     catégorie (catégories de virement et charges fixes exclues), longueur en jours."""
-    needle = pay_rule["payee_contains"].lower()
-    pays = []
-    for d in sorted(date.fromisoformat(i["date"]) for i in incomes_since(31 * (n + 1) + 31)
-                    if i["amount"] >= pay_rule["min_amount"] and needle in i["payee"].lower()):
-        if not pays or (d - pays[-1]).days >= PAY_MIN_GAP_DAYS:
-            pays.append(d)  # un second versement proche (prime) n'ouvre pas de cycle
+    pays = cycle.pay_dates(incomes_since(31 * (n + 1) + 31), pay_rule)
     bounds = list(zip(pays, pays[1:]))[-n:] if n > 0 else []
     if not bounds:
         return []
@@ -366,28 +358,42 @@ def _rule_group_id():
     return api_post("/rule-groups", {"title": RULE_GROUP})["data"]["id"]
 
 
-def find_rule(payee, category):
-    """Id d'une règle existante « payee ⇒ catégorie », sinon None."""
+def find_rule(payee):
+    """Règle existante pour ce payee : {id, category}, sinon None."""
     for r in _pages("/rules"):
         a = r["attributes"]
-        if (any(t.get("type") == RULE_TRIGGER and (t.get("value") or "").lower() == payee.lower()
-                for t in a.get("triggers", []))
-                and any(x.get("type") == "set_category" and x.get("value") == category
-                        for x in a.get("actions", []))):
-            return r["id"]
+        if any(t.get("type") == RULE_TRIGGER and (t.get("value") or "").lower() == payee.lower()
+               for t in a.get("triggers", [])):
+            cat = next((x.get("value") for x in a.get("actions", [])
+                        if x.get("type") == "set_category"), None)
+            return {"id": r["id"], "category": cat}
     return None
+
+
+def _rule_parts(payee, category):
+    # strict : seules les opérations encore sans catégorie sont touchées
+    return {
+        "strict": True,
+        "triggers": [{"type": RULE_TRIGGER, "value": payee, "stop_processing": False,
+                      "active": True},
+                     {"type": "has_no_category", "value": "true", "stop_processing": False,
+                      "active": True}],
+        "actions": [{"type": "set_category", "value": category,
+                     "stop_processing": False, "active": True}],
+    }
 
 
 def create_rule(payee, category):
     return api_post("/rules", {
         "title": f"Classement : {payee}"[:255],
         "rule_group_id": _rule_group_id(),
-        "trigger": "store-journal", "active": True, "strict": True, "stop_processing": False,
-        "triggers": [{"type": RULE_TRIGGER, "value": payee,
-                      "stop_processing": False, "active": True}],
-        "actions": [{"type": "set_category", "value": category,
-                     "stop_processing": False, "active": True}],
+        "trigger": "store-journal", "active": True, "stop_processing": False,
+        **_rule_parts(payee, category),
     })["data"]["id"]
+
+
+def update_rule(rule_id, payee, category):
+    api_put(f"/rules/{rule_id}", _rule_parts(payee, category))
 
 
 def trigger_rule(rule_id, days=400):

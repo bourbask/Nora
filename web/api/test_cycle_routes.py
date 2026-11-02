@@ -93,6 +93,12 @@ class FakeRegistry:
         self.triggered.append((path, params))
         return {}
 
+    def put(self, path, data):
+        rid = path.rsplit("/", 1)[1]
+        r = next(r for r in self.rules if r["id"] == rid)
+        r["attributes"].update(data)
+        return {"data": r}
+
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
@@ -109,6 +115,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(fc, "account_balance", lambda name, on_date=None: BALANCES.get(name))
     monkeypatch.setattr(fc, "api_get", reg.get)
     monkeypatch.setattr(fc, "api_post", reg.post)
+    monkeypatch.setattr(fc, "api_put", reg.put)
     c = TestClient(main.app)
     c.registry, c.log = reg, log
     return c
@@ -137,6 +144,51 @@ def test_cycle_days_left_and_quality(client):
     assert j["cushion"] == {"balance": 5000.0, "floor": 3000}
 
 
+def test_late_pay_falls_back_to_calendar_month(client, monkeypatch):
+    # paie d'octobre absente : celle de septembre clôt son cycle le 31 octobre
+    monkeypatch.setattr(fc, "incomes_since", lambda days: [
+        i for i in INCOMES if i["date"] != "2026-10-28"])
+    j = client.get("/api/cycle").json()
+    assert (j["start"], j["end"], j["days_left"]) == ("2026-11-01", "2026-11-30", 28)
+    assert j["quality"] == "incertaine" and j["basis"]["pay_date"] is None
+    assert j["charges_left"][0]["name"] == "Assurance"
+
+
+def test_bonus_does_not_open_cycle(client, monkeypatch):
+    monkeypatch.setattr(fc, "incomes_since", lambda days: INCOMES + [
+        {"date": "2026-10-31", "amount": 1500.0, "payee": "EMPLOYEUR SA"}])
+    assert client.get("/api/cycle").json()["start"] == "2026-10-28"
+    assert [u["id"] for u in client.get("/api/unclassified").json()] == ["c5", "c2"]
+
+
+@pytest.mark.parametrize("accounts", [None, [], ["Compte B"], ["Compte C"]])
+def test_missing_accounts_is_503(client, monkeypatch, accounts):
+    b = {k: v for k, v in CFG["budget"].items() if k != "accounts"}
+    if accounts is not None:
+        b["accounts"] = accounts
+    monkeypatch.setattr(main, "load_cfg", lambda: {**CFG, "budget": b})
+    for path in ("/api/cycle", "/api/cycle/afford?amount=10", "/api/cycle/save?amount=10",
+                 "/api/envelopes", "/api/finance-alerts"):
+        r = client.get(path)
+        assert r.status_code == 503 and "budget.accounts" in r.json()["detail"]
+
+
+def test_last_event_failure_is_stale(client):
+    client.log.write_text(
+        '{"timestamp":"2026-11-01T06:00:00Z","source":"banque","event":"import_completed","transactions":3}\n'
+        '{"timestamp":"2026-11-02T06:00:00Z","source":"banque","event":"import_failed","transactions":null}\n')
+    j = client.get("/api/cycle").json()
+    assert j["stale"] is True and j["last_sync"] is None
+
+
+def test_last_sync_compares_parsed_timestamps(client):
+    # même instant exprimé avec décalage : la comparaison se fait sur l'instant, pas le texte
+    client.log.write_text(
+        '{"timestamp":"2026-11-01T06:00:00Z","source":"a","event":"import_completed","transactions":1}\n'
+        '{"timestamp":"2026-11-01T09:00:00+05:00","source":"b","event":"import_completed","transactions":1}\n')
+    assert client.get("/api/cycle").json()["last_sync"] == "2026-11-01T06:00:00Z"
+
+
 def test_cycle_stale_after_48h(client):
     client.log.write_text('{"timestamp":"2026-10-31T07:00:00Z","source":"banque","event":"import_completed","transactions":1}\n')
     assert client.get("/api/cycle").json()["stale"] is True
@@ -145,20 +197,28 @@ def test_cycle_stale_after_48h(client):
     assert j["stale"] is True and j["last_sync"] is None
 
 
-def test_afford_reflects_can_afford(client):
+def test_afford_uses_poste_reserve(client):
+    # disponible 73.03 dont 56 déjà réservés à l'essence pour les 28 jours restants
+    assert client.get("/api/cycle").json()["available"]["available"] == 73.03
+    r = client.get("/api/cycle/afford?amount=80&poste=essence")
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["ok"], j["after"], j["reserve_used"], j["available"]) == (True, 49.03, 56.0, 73.03)
+    assert j["quality"] == "fiable" and j["stale"] is False and j["basis"]["complete_cycles"] == 3
+    no = client.get("/api/cycle/afford?amount=200&poste=essence").json()
+    assert no["ok"] is False and no["after"] == -70.97 and no["cuts"]
+    # sans poste : aucune réserve mobilisée
+    free = client.get("/api/cycle/afford?amount=80").json()
+    assert (free["ok"], free["after"], free["reserve_used"]) == (False, -6.97, 0)
+
+
+def test_afford_matches_can_afford(client):
     j = client.get("/api/cycle").json()
     left = {k: round(j["envelopes"][k] - j["spent"][k], 2) for k in j["envelopes"]}
-    postes = CFG["budget"]["postes"]
-    for amount in (70, 80):
-        r = client.get(f"/api/cycle/afford?amount={amount}&poste=essence")
-        assert r.status_code == 200
-        got = r.json()
-        want = budget.can_afford(j["available"], amount, "essence", "serein", left, postes)
-        assert {k: got[k] for k in want} == want
-        assert got["quality"] == "fiable" and got["stale"] is False
-    assert client.get("/api/cycle/afford?amount=70&poste=essence").json()["ok"] is True
-    no = client.get("/api/cycle/afford?amount=80&poste=essence").json()
-    assert no["ok"] is False and no["cuts"]
+    avail = {**j["available"], "available": round(j["available"]["available"] + 30, 2)}
+    got = client.get("/api/cycle/afford?amount=30&poste=essence").json()
+    want = budget.can_afford(avail, 30, "essence", "serein", left, CFG["budget"]["postes"])
+    assert {k: got[k] for k in want} == want
 
 
 @pytest.mark.parametrize("q", ["amount=0", "amount=-5", "amount=nan", "amount=inf",
@@ -189,6 +249,8 @@ def test_missing_budget_is_503(client, monkeypatch):
     for path in ("/api/cycle", "/api/envelopes", "/api/finance-alerts", "/api/unclassified"):
         r = client.get(path)
         assert r.status_code == 503 and "budget" in r.json()["detail"]
+    r = client.post("/api/rules", json={"payee": "MAGASIN", "poste": "courses"})
+    assert r.status_code == 503 and client.registry.rules == []
 
 
 def test_finance_alerts_unexpected(client):
@@ -215,7 +277,9 @@ def test_rules_idempotent(client):
     reg = client.registry
     assert len(reg.rules) == 1 and len(reg.groups) == 1
     rule = reg.rules[0]["attributes"]
-    assert rule["triggers"][0]["value"] == "MAGASIN"
+    assert rule["strict"] is True
+    assert [(t["type"], t["value"]) for t in rule["triggers"]] == [
+        ("destination_account_contains", "MAGASIN"), ("has_no_category", "true")]
     assert rule["actions"][0] == {"type": "set_category", "value": "Courses",
                                   "stop_processing": False, "active": True}
     path, params = reg.triggered[-1]
@@ -224,8 +288,19 @@ def test_rules_idempotent(client):
         year=date.fromisoformat(params["end"]).year - 1)
 
 
-@pytest.mark.parametrize("body", [{"payee": "X", "poste": "inconnu"},
+def test_rule_same_payee_other_category_is_updated(client):
+    j1 = client.post("/api/rules", json={"payee": "MAGASIN", "poste": "courses"}).json()
+    j2 = client.post("/api/rules", json={"payee": "magasin", "poste": "restos"}).json()
+    assert j2 == {"rule_id": j1["rule_id"], "created": False, "applied": True}
+    reg = client.registry
+    assert len(reg.rules) == 1
+    assert reg.rules[0]["attributes"]["actions"][0]["value"] == "Restaurants"
+    assert reg.triggered[-1][0] == f"/rules/{j1['rule_id']}/trigger"
+
+
+@pytest.mark.parametrize("body", [{"payee": "MAGASIN", "poste": "inconnu"},
                                   {"payee": "   ", "poste": "courses"},
+                                  {"payee": " ab ", "poste": "courses"},
                                   {"payee": "x" * 101, "poste": "courses"}])
 def test_rules_rejects_bad_input(client, body):
     assert client.post("/api/rules", json=body).status_code == 422
