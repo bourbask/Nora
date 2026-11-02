@@ -404,14 +404,13 @@ def api_rules(body: RuleBody):
     if not 3 <= len(payee) <= 100:
         raise HTTPException(422, "Le payee doit compter entre 3 et 100 caractères.")
     p = _poste(_budget_cfg(load_cfg()).get("postes", []), body.poste)
-    found = fc.find_rule(payee)  # une seule règle par payee
-    created = found is None
+    rule_id = fc.find_rule(payee)  # une seule règle de l'assistant par payee
+    created = rule_id is None
     if created:
         rule_id = fc.create_rule(payee, p["category"])
     else:
-        rule_id = found["id"]
-        if found["category"] != p["category"]:
-            fc.update_rule(rule_id, payee, p["category"])
+        # réécrite à chaque fois : catégorie à jour, strict + « sans catégorie » garantis
+        fc.update_rule(rule_id, payee, p["category"])
     fc.trigger_rule(rule_id)
     return {"rule_id": rule_id, "created": created, "applied": True}
 

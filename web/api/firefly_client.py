@@ -351,22 +351,23 @@ RULE_GROUP = "Classement assistant"
 RULE_TRIGGER = "destination_account_contains"
 
 
-def _rule_group_id():
+def _rule_group_id(create=True):
     for g in _pages("/rule-groups"):
         if g["attributes"].get("title") == RULE_GROUP:
             return g["id"]
-    return api_post("/rule-groups", {"title": RULE_GROUP})["data"]["id"]
+    return api_post("/rule-groups", {"title": RULE_GROUP})["data"]["id"] if create else None
 
 
 def find_rule(payee):
-    """Règle existante pour ce payee : {id, category}, sinon None."""
-    for r in _pages("/rules"):
-        a = r["attributes"]
+    """Id de la règle de l'assistant pour ce payee, sinon None. Seul le groupe
+    dédié est lu : les règles écrites par l'utilisateur ne sont jamais touchées."""
+    gid = _rule_group_id(create=False)
+    if gid is None:
+        return None
+    for r in _pages(f"/rule-groups/{gid}/rules"):
         if any(t.get("type") == RULE_TRIGGER and (t.get("value") or "").lower() == payee.lower()
-               for t in a.get("triggers", [])):
-            cat = next((x.get("value") for x in a.get("actions", [])
-                        if x.get("type") == "set_category"), None)
-            return {"id": r["id"], "category": cat}
+               for t in r["attributes"].get("triggers", [])):
+            return r["id"]
     return None
 
 

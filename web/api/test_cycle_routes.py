@@ -75,10 +75,16 @@ class FakeRegistry:
     """Règles et groupes de règles du registre, en mémoire."""
 
     def __init__(self):
-        self.groups, self.rules, self.triggered = [], [], []
+        self.groups, self.rules, self.triggered, self.puts = [], [], [], []
 
     def get(self, path, params=None):
-        items = {"/rule-groups": self.groups, "/rules": self.rules}[path]
+        # pas de liste globale des règles : seul le groupe dédié est lisible
+        if path == "/rule-groups":
+            items = self.groups
+        else:
+            gid = path.split("/")[2]
+            assert path == f"/rule-groups/{gid}/rules"
+            items = [r for r in self.rules if r["attributes"].get("rule_group_id") == gid]
         return {"data": items, "meta": {"pagination": {"total_pages": 1}}}
 
     def post(self, path, data, params=None):
@@ -96,6 +102,7 @@ class FakeRegistry:
     def put(self, path, data):
         rid = path.rsplit("/", 1)[1]
         r = next(r for r in self.rules if r["id"] == rid)
+        self.puts.append(rid)
         r["attributes"].update(data)
         return {"data": r}
 
@@ -182,7 +189,7 @@ def test_last_event_failure_is_stale(client):
 
 
 def test_last_sync_compares_parsed_timestamps(client):
-    # même instant exprimé avec décalage : la comparaison se fait sur l'instant, pas le texte
+    # 09:00+05:00 = 04:00Z, antérieur à 06:00Z : la comparaison porte sur l'instant, pas sur le texte
     client.log.write_text(
         '{"timestamp":"2026-11-01T06:00:00Z","source":"a","event":"import_completed","transactions":1}\n'
         '{"timestamp":"2026-11-01T09:00:00+05:00","source":"b","event":"import_completed","transactions":1}\n')
@@ -296,6 +303,35 @@ def test_rule_same_payee_other_category_is_updated(client):
     assert len(reg.rules) == 1
     assert reg.rules[0]["attributes"]["actions"][0]["value"] == "Restaurants"
     assert reg.triggered[-1][0] == f"/rules/{j1['rule_id']}/trigger"
+
+
+def test_rule_outside_assistant_group_is_untouched(client):
+    reg = client.registry
+    user_rule = {"title": "Règle manuelle", "rule_group_id": "9", "strict": False,
+                 "triggers": [{"type": "destination_account_contains", "value": "MAGASIN"}],
+                 "actions": [{"type": "set_category", "value": "Loisirs"}]}
+    reg.groups.append({"id": "9", "attributes": {"title": "Mes règles"}})
+    reg.rules.append({"id": "50", "attributes": dict(user_rule)})
+    j = client.post("/api/rules", json={"payee": "MAGASIN", "poste": "courses"}).json()
+    assert j["created"] is True and j["rule_id"] != "50"
+    assert reg.rules[0]["attributes"] == user_rule and "50" not in reg.puts
+    assert ("/rules/50/trigger", ) not in [(t[0],) for t in reg.triggered]
+
+
+def test_legacy_assistant_rule_is_repaired_before_trigger(client):
+    reg = client.registry
+    reg.groups.append({"id": "1", "attributes": {"title": "Classement assistant"}})
+    reg.rules.append({"id": "7", "attributes": {
+        "rule_group_id": "1", "strict": False,
+        "triggers": [{"type": "destination_account_contains", "value": "MAGASIN"}],
+        "actions": [{"type": "set_category", "value": "Courses"}]}})
+    j = client.post("/api/rules", json={"payee": "MAGASIN", "poste": "courses"}).json()
+    assert j == {"rule_id": "7", "created": False, "applied": True}
+    a = reg.rules[0]["attributes"]
+    assert reg.puts == ["7"] and a["strict"] is True
+    assert [t["type"] for t in a["triggers"]] == ["destination_account_contains", "has_no_category"]
+    assert reg.triggered[-1][0] == "/rules/7/trigger"
+    assert len(reg.rules) == 1
 
 
 @pytest.mark.parametrize("body", [{"payee": "MAGASIN", "poste": "inconnu"},
