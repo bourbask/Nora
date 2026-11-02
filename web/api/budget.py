@@ -38,8 +38,9 @@ def cuts(shortfall, envelopes_left, postes):
 def can_afford(avail, amount, poste, mode, envelopes_left, postes):
     after = round(avail["available"] - amount, 2)
     compressible = any(p["name"] == poste and p["compressible"] for p in postes)
-    blocked = (mode == "reconstitution" and compressible
-               and amount > envelopes_left.get(poste, 0))
+    # reconstitution : aucun écart sans poste, aucun poste compressible au-delà de son enveloppe
+    blocked = mode == "reconstitution" and (
+        poste is None or (compressible and amount > envelopes_left.get(poste, 0)))
     c = cuts(-after, envelopes_left, postes) if after < 0 else []
     if blocked:
         reason = "reconstitution"

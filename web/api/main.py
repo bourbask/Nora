@@ -198,12 +198,26 @@ def _parse_ts(ts):
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def last_sync():
-    """Horodatage du dernier import réussi (toutes sources), None si inconnu."""
+OK_EVENT = "import_completed"
+
+
+def sync_state(sources=None):
+    """(dernier import réussi, échec connu). Avec `sources` : réussite la plus ancienne
+    parmi elles, et échec si l'une est absente ou en échec à son dernier événement.
+    Sans : réussite la plus récente, échec si une source quelconque est en échec."""
     text = AUTO_SYNC_LOG.read_text() if AUTO_SYNC_LOG.exists() else ""
-    ok = [(t, v["timestamp"]) for v in import_status.last_per_source(text).values()
-          if v.get("event") == "import_completed" and (t := _parse_ts(v.get("timestamp")))]
-    return max(ok)[1] if ok else None
+    latest = import_status.last_per_source(text)
+    if sources:
+        ok = import_status.last_per_source(text, OK_EVENT)
+        failed = any(latest.get(s, {}).get("event") != OK_EVENT for s in sources)
+        ts = [(_parse_ts(ok[s]["timestamp"]), ok[s]["timestamp"]) for s in sources if s in ok]
+        if len(ts) < len(sources) or any(t is None for t, _ in ts):
+            return None, True
+        return min(ts)[1], failed
+    failed = any(v.get("event") != OK_EVENT for v in latest.values())
+    ok = [(t, v["timestamp"]) for v in latest.values()
+          if v.get("event") == OK_EVENT and (t := _parse_ts(v.get("timestamp")))]
+    return (max(ok)[1] if ok else None), failed
 
 
 def _stale(ts):
@@ -256,7 +270,9 @@ def _cycle_state(cfg):
 
     pay, start, end = _current_cycle(b, today)
     ws = fc.withdrawals_between(start, today)
-    spending = [w for w in ws if w["category"].lower() not in ex]
+    # charges fixes exclues comme dans l'historique : déjà comptées dans les charges
+    spending = [w for w in ws if w["category"].lower() not in ex
+                and not cycle.is_charge(w, charges)]
     by_cat = {}
     for w in spending:
         if w["category"]:
@@ -275,7 +291,9 @@ def _cycle_state(cfg):
     m = budget.mode(cushion_bal, cushion["floor_eur"])
     env = budget.envelopes(rates, (end - start).days + 1, postes, m)
     spent = budget.spent_in_cycle(by_cat, postes)
-    ts = last_sync()
+    ts, sync_failed = sync_state(b.get("sync_sources"))
+    consent = _consent(b)
+    consent_expired = consent is not None and consent < today
     return {
         "cfg": b, "postes": postes, "today": today, "start": start, "end": end,
         "days_left": days_left, "mode": m, "rates": rates, "avail": avail,
@@ -288,8 +306,14 @@ def _cycle_state(cfg):
                       history[-1]["start"] + timedelta(days=history[-1]["days"] - 1))]
                   if history else None,
                   "coverage": coverage},
-        "last_sync": ts, "stale": _stale(ts),
+        "last_sync": ts, "consent": consent, "consent_expired": consent_expired,
+        "stale": _stale(ts) or sync_failed or consent_expired,
     }
+
+
+def _consent(b):
+    c = b.get("consent_expires")
+    return date.fromisoformat(c) if isinstance(c, str) else c
 
 
 def _iso(d):
@@ -298,7 +322,7 @@ def _iso(d):
 
 def _meta(st):
     return {"quality": st["quality"], "stale": st["stale"], "last_sync": st["last_sync"],
-            "basis": st["basis"]}
+            "consent_expired": st["consent_expired"], "basis": st["basis"]}
 
 
 def _amount(amount):
@@ -373,12 +397,9 @@ def api_finance_alerts():
         if cushion.get("ceiling_eur") else None
     unexpected = [w for w in st["ws"]
                   if not w["category"] and not cycle.is_charge(w, st["charges"])]
-    consent = b.get("consent_expires")
-    if isinstance(consent, str):
-        consent = date.fromisoformat(consent)
     return {"alerts": finance_alerts.build(
         st["start"], st["avail"], st["envelopes"], st["spent"], st["postes"], unexpected,
-        consent, today, eta, cushion.get("warn_months", 3),
+        st["consent"], today, eta, cushion.get("warn_months", 3),
         unexpected_min=b.get("unexpected_min_eur", 100.0)), **_meta(st)}
 
 
@@ -391,7 +412,9 @@ def api_unclassified():
     b = _budget_cfg(cfg)
     today = _today()
     _, start, _ = _current_cycle(b, today)
-    ws = [w for w in fc.withdrawals_between(start, today) if not w["category"] and w["amount"] > 0]
+    charges = cfg.get("dormant", {}).get("recurring_charges", [])
+    ws = [w for w in fc.withdrawals_between(start, today) if not w["category"]
+          and w["amount"] > 0 and not cycle.is_charge(w, charges)]
     ws.sort(key=lambda w: w["date"], reverse=True)
     return [{"id": w["id"], "date": w["date"], "payee": finance_alerts._clean(w["payee"]),
              "amount": w["amount"]} for w in ws[:UNCLASSIFIED_MAX]]

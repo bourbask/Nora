@@ -66,7 +66,8 @@ WITHDRAWALS += [_w("c1", "2026-10-30", 40.0, "SUPERMARCHE", "Courses"),
                 _w("c2", "2026-10-31", 150.0, "MAGASIN"),
                 _w("c3", "2026-11-01", 705.0, "LOYER", "Logement"),
                 _w("c4", "2026-11-01", 20.0, "STATION", "Carburant"),
-                _w("c5", "2026-11-02", 12.5, "BOULANGERIE")]
+                _w("c5", "2026-11-02", 12.5, "BOULANGERIE"),
+                _w("c6", "2026-11-02", 700.0, "PHARMACIE", "Santé")]
 
 BALANCES = {"Compte A": 500.0, "Compte B": 5000.0, "Compte C": 9000.0}
 
@@ -203,6 +204,68 @@ def test_cycle_stale_after_48h(client):
     client.log.write_text("")
     j = client.get("/api/cycle").json()
     assert j["stale"] is True and j["last_sync"] is None
+
+
+def _with(monkeypatch, extra, drop=()):
+    ws = [w for w in WITHDRAWALS if w["id"] not in drop] + extra
+    monkeypatch.setattr(fc, "withdrawals_between", lambda s, e: [
+        w for w in ws if s <= date.fromisoformat(w["date"]) <= e])
+
+
+def test_fixed_charges_excluded_from_cycle_spending(client, monkeypatch):
+    base = client.get("/api/cycle").json()
+    # loyer non classé, assurance classée dans un poste : ni couverture, ni dépensé, ni à classer
+    _with(monkeypatch, [_w("c3", "2026-11-01", 705.0, "LOYER"),
+                        _w("c7", "2026-11-02", 50.0, "ASSUR", "Courses")], drop={"c3"})
+    j = client.get("/api/cycle").json()
+    assert j["basis"]["coverage"] == base["basis"]["coverage"]
+    assert j["spent"] == base["spent"]
+    assert [u["id"] for u in client.get("/api/unclassified").json()] == ["c5", "c2"]
+
+
+def test_reconstitution_refuses_purchase_without_poste(client, monkeypatch):
+    monkeypatch.setitem(BALANCES, "Compte B", 100.0)
+    no = client.get("/api/cycle/afford?amount=5").json()
+    assert (no["ok"], no["reason"]) == (False, "reconstitution")
+    assert client.get("/api/cycle/afford?amount=5&poste=courses").json()["ok"] is True
+
+
+def test_sync_sources_min_of_latest_success(client, monkeypatch):
+    b = {**CFG["budget"], "sync_sources": ["a", "b"]}
+    monkeypatch.setattr(main, "load_cfg", lambda: {**CFG, "budget": b})
+    client.log.write_text(
+        '{"timestamp":"2026-11-02T06:00:00Z","source":"a","event":"import_completed","transactions":1}\n'
+        '{"timestamp":"2026-11-01T06:00:00Z","source":"b","event":"import_completed","transactions":1}\n'
+        '{"timestamp":"2026-11-02T07:00:00Z","source":"autre","event":"import_failed","transactions":null}\n')
+    j = client.get("/api/cycle").json()
+    assert (j["last_sync"], j["stale"]) == ("2026-11-01T06:00:00Z", False)
+    # dernier événement de b en échec : dernière réussite conservée, mais périmé
+    with client.log.open("a") as f:
+        f.write('{"timestamp":"2026-11-02T07:30:00Z","source":"b","event":"import_failed","transactions":null}\n')
+    j = client.get("/api/cycle").json()
+    assert (j["last_sync"], j["stale"]) == ("2026-11-01T06:00:00Z", True)
+    # source configurée absente du journal : périmé
+    b["sync_sources"] = ["a", "c"]
+    j = client.get("/api/cycle").json()
+    assert (j["last_sync"], j["stale"]) == (None, True)
+
+
+def test_any_latest_failure_is_stale_without_sync_sources(client):
+    client.log.write_text(
+        '{"timestamp":"2026-11-02T06:00:00Z","source":"a","event":"import_completed","transactions":1}\n'
+        '{"timestamp":"2026-11-02T07:00:00Z","source":"b","event":"import_failed","transactions":null}\n')
+    j = client.get("/api/cycle").json()
+    assert (j["last_sync"], j["stale"]) == ("2026-11-02T06:00:00Z", True)
+
+
+@pytest.mark.parametrize("consent,expired", [("2026-11-01", True), ("2026-11-02", False), (None, False)])
+def test_consent_expired_flagged_everywhere(client, monkeypatch, consent, expired):
+    b = {**CFG["budget"], "consent_expires": consent}
+    monkeypatch.setattr(main, "load_cfg", lambda: {**CFG, "budget": b})
+    for path in ("/api/cycle", "/api/cycle/afford?amount=1", "/api/cycle/save?amount=1",
+                 "/api/envelopes", "/api/finance-alerts"):
+        j = client.get(path).json()
+        assert j["consent_expired"] is expired and j["stale"] is expired
 
 
 def test_afford_uses_poste_reserve(client):

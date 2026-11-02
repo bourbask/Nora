@@ -59,6 +59,7 @@ budget:                           # pay cycle, available amount, envelopes (abse
     - {name: essence, category: "Carburant",   compressible: false, floor_eur: 0}
   reference_cycles: 6
   unexpected_min_eur: 100
-  consent_expires: null           # "YYYY-MM-DD"
+  consent_expires: null           # "YYYY-MM-DD" ; once past, every answer is flagged stale
+  sync_sources: []                # import sources feeding `accounts` (empty = any source)
 
 transfer_categories: ["Virements", "Transfert", "Transfer", "Investissement", "Dépôts", "Espèces"]

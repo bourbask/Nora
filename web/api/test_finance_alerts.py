@@ -62,6 +62,14 @@ def test_unexpected():
     assert kinds(run(unexpected=u, unexpected_min=50.0)) == ["unexpected"] * 2
 
 
+def test_unexpected_strips_invisible_and_bidi():
+    bad = "".join(map(chr, [*range(0x200B, 0x2010), 0x2028, 0x2029, *range(0x202A, 0x202F),
+                            *range(0x2066, 0x206A), 0xFEFF]))
+    u = [{"date": "2026-11-03", "payee": f"Sh{bad}op", "amount": 150.0}]
+    det = run(unexpected=u)[0]["details"]
+    assert not set(bad) & set(det)
+
+
 def test_consent():
     assert run(consent_expires=date(2026, 11, 25)) == []
     assert kinds(run(consent_expires=date(2026, 11, 24))) == ["consent"]

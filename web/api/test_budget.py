@@ -44,6 +44,12 @@ def test_can_afford():
     assert r["ok"] is False and r["reason"] == "reconstitution"
     r = budget.can_afford({"available": 500}, 25, "restos", "serein", left, POSTES)
     assert r["ok"] is True and r["after"] == 475 and r["cuts"] == []
+    # reconstitution : aucun écart sans poste ; les nécessités passent si le disponible suffit
+    r = budget.can_afford({"available": 500}, 5, None, "reconstitution", LEFT, POSTES)
+    assert r["ok"] is False and r["reason"] == "reconstitution"
+    assert budget.can_afford({"available": 500}, 5, None, "serein", LEFT, POSTES)["ok"] is True
+    r = budget.can_afford({"available": 500}, 300, "courses", "reconstitution", LEFT, POSTES)
+    assert r["ok"] is True
 
 
 def test_can_save():

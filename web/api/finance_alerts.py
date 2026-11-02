@@ -7,7 +7,8 @@ import budget
 
 NEAR = 0.85
 CONSENT_DAYS = 14
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# contrôle, largeur nulle, séparateurs de ligne, marques et isolats bidirectionnels, BOM
+_CTRL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]")
 
 
 def _e(x):
