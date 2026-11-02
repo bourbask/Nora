@@ -17,8 +17,8 @@ Zéro LLM (invariant). Détection 100 % déterministe.
 ### Donnée réelle observée (historique importé 2026-07-08)
 
 Les paiements par carte sont la **principale source de données du quotidien** —
-les exclure raterait des abonnements réels facturés sur carte (Netflix, Adobe,
-Google, ChatGPT, OVH, Microsoft…). Décision : **détecter sur TOUS les retraits**,
+les exclure raterait des abonnements réels facturés sur carte (streaming, logiciels,
+services cloud, IA, hébergeur…). Décision : **détecter sur TOUS les retraits**,
 sans filtre par type de paiement.
 
 Le discriminant n'est ni le type de paiement ni la stabilité du montant (les abos
@@ -26,12 +26,12 @@ dérivent : hausses de prix, changements de forfait), mais la **régularité de
 cadence**. Vérifié sur les données réelles : une charge récurrente se déclenche
 ~1×/mois à ~30 j d'écart ; une dépense variable (courses, essence, resto) se
 déclenche plusieurs fois/mois à écarts courts et irréguliers. Le test de cadence
-sépare proprement les deux et fait ressortir prêts (Prêt CMB, Cofidis), loyer
-(722,75 €), impôts (DGFiP 212,50 €), prélèvements (Suravenir, EDF, SFR, Orange) ET
-abos carte — tout en rejetant Intermarché/Super U/stations essence.
+sépare proprement les deux et fait ressortir prêts (prêt banque, prêt conso), loyer
+(montant fictif), impôts (montant fictif), prélèvements (assureur, énergie, opérateurs) ET
+abos carte — tout en rejetant supermarchés/stations essence.
 
 **Limite connue (déférée) :** le regroupement par `destination_name` exact
-fragmente un même abo en plusieurs variantes de libellé (Adobe apparaît sous 5
+fragmente un même abo en plusieurs variantes de libellé (Un logiciel apparaît sous 5
 chaînes différentes). L'utilisateur voit des doublons et confirme la bonne ligne.
 Normalisation floue des libellés marchands = knob futur, hors V1.
 

@@ -34,7 +34,7 @@
 
 Ajouter en haut : `from datetime import date`.
 
-**(a) Mettre à jour chaque appel existant** `R.detect_recurrences(tx, set())` → `R.detect_recurrences(tx, set(), date(2026, 4, 1))` et `R.detect_recurrences(tx, {"NETFLIX"})` → `R.detect_recurrences(tx, {"NETFLIX"}, date(2026, 4, 1))` (cette date garde "récentes" les fixtures existantes, qui vont jusqu'à avril 2026).
+**(a) Mettre à jour chaque appel existant** `R.detect_recurrences(tx, set())` → `R.detect_recurrences(tx, set(), date(2026, 4, 1))` et `R.detect_recurrences(tx, {"STREAMING"})` → `R.detect_recurrences(tx, {"STREAMING"}, date(2026, 4, 1))` (cette date garde "récentes" les fixtures existantes, qui vont jusqu'à avril 2026).
 
 **(b) SUPPRIMER `test_quarterly_rejected`** (lignes 38-40) : ce test asserte qu'une cadence ~90 j renvoie `[]`, ce qui n'est plus vrai — le trimestriel est désormais détecté. Il est remplacé par `test_quarterly_detected` / `test_quarterly_stale_dropped` ci-dessous.
 
@@ -75,8 +75,8 @@ def test_yearly_stale_dropped():
     assert R.detect_recurrences(tx, set(), date(2026, 6, 1)) == []
 
 def test_dismissed_excluded():
-    tx = _mk("NETFLIX", ["2026-01-05", "2026-02-05", "2026-03-05"], 15.99)
-    assert R.detect_recurrences(tx, set(), date(2026, 4, 1), dismissed={"NETFLIX"}) == []
+    tx = _mk("STREAMING", ["2026-01-05", "2026-02-05", "2026-03-05"], 15.99)
+    assert R.detect_recurrences(tx, set(), date(2026, 4, 1), dismissed={"STREAMING"}) == []
 ```
 
 - [ ] **Step 2: Lancer, vérifier l'échec**
