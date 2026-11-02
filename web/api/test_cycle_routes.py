@@ -10,6 +10,7 @@ os.environ.setdefault("FIREFLY_TOKEN", "test")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import budget  # noqa: E402
+import cycle  # noqa: E402
 import firefly_client as fc  # noqa: E402
 import main  # noqa: E402
 
@@ -350,7 +351,7 @@ def test_rules_idempotent(client):
     rule = reg.rules[0]["attributes"]
     assert rule["strict"] is True
     assert [(t["type"], t["value"]) for t in rule["triggers"]] == [
-        ("destination_account_contains", "MAGASIN"), ("has_no_category", "true")]
+        ("description_contains", "MAGASIN"), ("has_no_category", "true")]
     assert rule["actions"][0] == {"type": "set_category", "value": "Courses",
                                   "stop_processing": False, "active": True}
     path, params = reg.triggered[-1]
@@ -393,7 +394,7 @@ def test_legacy_assistant_rule_is_repaired_before_trigger(client):
     assert j == {"rule_id": "7", "created": False, "applied": True}
     a = reg.rules[0]["attributes"]
     assert reg.puts == ["7"] and a["strict"] is True
-    assert [t["type"] for t in a["triggers"]] == ["destination_account_contains", "has_no_category"]
+    assert [t["type"] for t in a["triggers"]] == ["description_contains", "has_no_category"]
     assert reg.triggered[-1][0] == "/rules/7/trigger"
     assert len(reg.rules) == 1
 
@@ -433,3 +434,31 @@ def test_remaining_unchanged(monkeypatch):
     r = TestClient(main.app, headers={"Authorization": "Bearer t"}).get("/api/remaining")
     assert r.status_code == 200
     assert r.json() == REMAINING_SNAPSHOT
+
+
+def _tx(kind, name, desc):
+    return {"data": [{"id": "1", "attributes": {"transactions": [
+        {"date": "2026-11-01", "amount": "10", "description": desc,
+         "destination_name": name if kind == "withdrawal" else "Compte B",
+         "source_name": name if kind == "deposit" else "Compte B"}]}}], "meta": {}}
+
+
+def test_payee_from_description_when_counterparty_unknown(monkeypatch):
+    monkeypatch.setattr(fc, "api_get", lambda p, params=None: _tx(
+        "withdrawal", "(unknown destination)", "PRLV  SURAVENIR ASSURANCES AUTO\n10/2026-123 "))
+    w = fc.withdrawals_between(date(2026, 11, 1), date(2026, 11, 2))
+    assert w[0]["payee"] == "PRLV SURAVENIR ASSURANCES AUTO 10/2026-123"
+
+
+def test_payee_keeps_real_destination(monkeypatch):
+    monkeypatch.setattr(fc, "api_get", lambda p, params=None: _tx("withdrawal", "Magasin", "CB X"))
+    assert fc.withdrawals_since(1)[0]["payee"] == "Magasin"
+
+
+def test_unknown_source_deposit_matches_pay_rule(monkeypatch):
+    monkeypatch.setattr(fc, "api_get", lambda p, params=None: _tx(
+        "deposit", "(Unknown source)", "VIR EMPLOYEUR SA VIREMENT"))
+    inc = fc.incomes_since(30)
+    assert inc[0]["payee"] == "VIR EMPLOYEUR SA VIREMENT"
+    assert cycle.pay_dates(inc, {"payee_contains": "EMPLOYEUR", "min_amount": 0}) \
+        == [date(2026, 11, 1)]

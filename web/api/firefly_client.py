@@ -232,6 +232,15 @@ def monthly_income_series(ref_month, months=6):
     return out
 
 
+def _payee(t, kind):
+    """Tiers : nom de la contrepartie (destination pour une sortie, source pour
+    une entrée) ; si elle est vide ou « (unknown … », le libellé nettoyé."""
+    name = (t.get("destination_name" if kind == "withdrawal" else "source_name") or "").strip()
+    if name and not name.lower().startswith("(unknown"):
+        return name
+    return " ".join((t.get("description") or "").split()) or "?"
+
+
 def withdrawals_since(window_months=12):
     """Toutes les sorties (paginées) depuis N mois. Aucun filtre par type de
     paiement — la détection de cadence trie. payee = destination_name."""
@@ -246,7 +255,7 @@ def withdrawals_since(window_months=12):
                 if amt == 0:
                     continue
                 out.append({"date": t["date"][:10], "amount": amt,
-                            "payee": t.get("destination_name") or "?"})
+                            "payee": _payee(t, "withdrawal")})
         pag = data.get("meta", {}).get("pagination", {})
         if page >= pag.get("total_pages", page):
             break
@@ -300,7 +309,7 @@ def incomes_since(days):
             amt = abs(float(t["amount"]))
             if amt:
                 out.append({"date": t["date"][:10], "amount": amt,
-                            "payee": t.get("source_name") or "?"})
+                            "payee": _payee(t, "deposit")})
     return out
 
 
@@ -313,7 +322,7 @@ def withdrawals_between(start, end):
             amt = abs(float(t["amount"]))
             if amt:
                 out.append({"id": g["id"], "date": t["date"][:10], "amount": amt,
-                            "payee": t.get("destination_name") or "?",
+                            "payee": _payee(t, "withdrawal"),
                             "category": t.get("category_name") or "",
                             "description": t.get("description") or ""})
     return out
@@ -347,8 +356,9 @@ def account_balance(name, on_date=None):
 
 
 RULE_GROUP = "Classement assistant"
-# Le payee exposé est le compte de destination : la règle teste ce même champ.
-RULE_TRIGGER = "destination_account_contains"
+# Le libellé contient toujours la contrepartie (les deux types d'import).
+RULE_TRIGGER = "description_contains"
+_LEGACY_TRIGGER = "destination_account_contains"  # règles d'avant : réparées au PUT
 
 
 def _rule_group_id(create=True):
@@ -365,7 +375,7 @@ def find_rule(payee):
     if gid is None:
         return None
     for r in _pages(f"/rule-groups/{gid}/rules"):
-        if any(t.get("type") == RULE_TRIGGER and (t.get("value") or "").lower() == payee.lower()
+        if any(t.get("type") in (RULE_TRIGGER, _LEGACY_TRIGGER) and (t.get("value") or "").lower() == payee.lower()
                for t in r["attributes"].get("triggers", [])):
             return r["id"]
     return None
