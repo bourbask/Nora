@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
+import alerts as alerts_mod
 import amortization
 import drift
 import firefly_client as fc
@@ -25,7 +26,11 @@ import scores
 import categorization
 import snapshots
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# depth-safe: web/api/main.py -> repo root locally; falls back to parent when the
+# module is mounted flat (e.g. web/api mounted at /app in a container). CONFIG/DATA
+# dirs are overridable via NORA_CONFIG_DIR / NORA_DATA_DIR regardless.
+_p = Path(__file__).resolve()
+REPO_ROOT = _p.parents[2] if len(_p.parents) > 2 else _p.parent
 CONFIG_DIR = Path(os.environ.get("NORA_CONFIG_DIR", REPO_ROOT / "config"))
 STRATEGY_FILE = CONFIG_DIR / "strategy.yaml"
 STRATEGY_EXAMPLE = CONFIG_DIR / "strategy.example.yaml"
@@ -208,6 +213,20 @@ def api_drift():
     return {"alerts": drift.drift_alerts(
         pf["bucket_weights"], inv.get("target_buckets", {}),
         pf["crypto_weight"], inv.get("crypto_cap", 0.10), inv.get("drift_threshold", 0.10))}
+
+
+@app.get("/api/alerts")
+def api_alerts():
+    """Agrégateur : réutilise drift/guardrail/savings-trend/scores existants et
+    renvoie le schéma unifié, filtré par l'enable-map de strategy.yaml."""
+    cfg = load_cfg()
+    pf = fc.portfolio(cfg)
+    inv = cfg.get("invested", {})
+    drift_result = drift.drift_alerts(
+        pf["bucket_weights"], inv.get("target_buckets", {}),
+        pf["crypto_weight"], inv.get("crypto_cap", 0.10), inv.get("drift_threshold", 0.10))
+    return alerts_mod.build_alerts(
+        cfg, drift_result, fc.guardrail_view(cfg), fc.savings_trend_view(cfg), api_scores())
 
 
 @app.get("/api/loans")

@@ -39,4 +39,11 @@ scores:
   dormant_weights:  {cushion: 0.5, cash_drag: 0.25, savings_rate: 0.25}
   invested_weights: {diversification: 0.4, class_align: 0.4, crypto_cap: 0.2}
 
+alerts:                           # enable-map for GET /api/alerts (absent block = all on)
+  drift: true
+  cushion: true
+  savings: true
+  scores: true
+  score_floor: 50                 # health-score alert threshold (0-100)
+
 transfer_categories: ["Virements", "Transfert", "Transfer", "Investissement", "Dépôts", "Espèces"]
