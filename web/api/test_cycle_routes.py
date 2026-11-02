@@ -472,3 +472,12 @@ def test_unclassified_payee_is_description(client):
     finally:
         WITHDRAWALS.pop()
     assert [u["payee"] for u in j if u["id"] == "c9"] == ["CARTE 03/07 ENSEIGNE B VILLE"]
+
+
+def test_uncategorized_history_makes_quality_uncertain(client, monkeypatch):
+    # cycle en cours classé, mais l'historique qui fournit les rythmes ne l'est pas
+    _with(monkeypatch, [_w("h9", "2026-08-10", 2000.0, "MAGASIN")])
+    j = client.get("/api/cycle").json()
+    assert j["basis"]["coverage"] >= cycle.MIN_COVERAGE
+    assert j["basis"]["history_coverage"] == round(1 - 2000 / 3086, 4)
+    assert j["quality"] == "incertaine"

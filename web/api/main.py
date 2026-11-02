@@ -281,6 +281,11 @@ def _cycle_state(cfg):
     coverage = round(sum(by_cat.values()) / total, 4) if total else 1.0
 
     history = fc.cycles_history(b.get("reference_cycles", 6), b["pay"], ex, charges)
+    # les rythmes viennent de l'historique : sa couverture compte autant que celle du cycle
+    hist = [(k, v) for c in history for k, v in c["by_category"].items()]
+    hist_total = sum(v for _, v in hist)
+    hist_coverage = (round(1 - sum(v for k, v in hist if k == "(sans catégorie)") / hist_total, 4)
+                     if hist_total else 1.0)
     rates = cycle.daily_rates(history)
     balance = sum(_balance(a) for a in accounts)
     charges_left = cycle.remaining_charges(charges, start, end, ws)
@@ -299,13 +304,13 @@ def _cycle_state(cfg):
         "days_left": days_left, "mode": m, "rates": rates, "avail": avail,
         "charges_left": charges_left, "envelopes": env, "spent": spent,
         "cushion_balance": cushion_bal, "ws": ws, "charges": charges,
-        "quality": cycle.quality(len(history), coverage, pay is not None),
+        "quality": cycle.quality(len(history), min(coverage, hist_coverage), pay is not None),
         "basis": {"pay_date": pay.isoformat() if pay else None,
                   "complete_cycles": len(history),
                   "reference_period": [_iso(history[0]["start"]), _iso(
                       history[-1]["start"] + timedelta(days=history[-1]["days"] - 1))]
                   if history else None,
-                  "coverage": coverage},
+                  "coverage": coverage, "history_coverage": hist_coverage},
         "last_sync": ts, "consent": consent, "consent_expired": consent_expired,
         "stale": _stale(ts) or sync_failed or consent_expired,
     }
