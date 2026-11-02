@@ -9,7 +9,7 @@
 `invested_health` calcule déjà les distances (`class_align` via TVD vs
 `target_buckets`, `crypto_cap` via l'écart au plafond). Cette feature les
 transforme en **alertes explicites** au-delà d'un seuil : un bucket hors cible,
-ou la crypto au-dessus du cap. Données de portefeuille présentes (holdings TR) →
+ou la crypto au-dessus du cap. Données de portefeuille présentes (holdings) →
 sortie live immédiate.
 
 Pose aussi la **couture IA V2-C** à moindre coût : chaque alerte porte un objet

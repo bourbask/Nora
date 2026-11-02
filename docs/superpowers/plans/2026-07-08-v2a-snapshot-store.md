@@ -272,7 +272,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Vérifier la capture contre le stack réel**
 
 ```bash
-cd /home/bourbasquetk/Projects/others/nora && set -a && source .env && set +a && \
+cd <repo> && set -a && source .env && set +a && \
 ./.venv/bin/python scripts/capture-snapshot.py --backfill 6
 cat data/snapshots.json | ./.venv/bin/python -m json.tool | head -40
 ```

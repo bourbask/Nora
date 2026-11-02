@@ -6,7 +6,7 @@
 
 ## Contexte
 
-L'utilisateur a plusieurs prêts (2 auto + Cofidis + Prêt CMB). V1 modélise la dette
+L'utilisateur a plusieurs prêts (2 auto + prêt conso + prêt banque). V1 modélise la dette
 comme `remaining_balance` manuel dans le ledger (kind=loan). L'amortissement calcule,
 par prêt : la date de payoff, le solde mois par mois, et le split capital/intérêt —
 en close-form depuis solde + mensualité + taux. Prérequis (passifs V1) présent.
