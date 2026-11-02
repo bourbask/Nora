@@ -68,6 +68,8 @@ db-shell: ## psql shell into the DB
 	$(DB)
 
 ## --- dashboard (dev) ---
+# Jeton local par défaut, partagé par l'API et le proxy Vite.
+dev api ui: export NORA_API_TOKEN ?= dev
 dev: ## Run api (:8068) + ui (:5173) in background; stop with 'make dev-stop'
 	@mkdir -p .run
 	@setsid bash -c 'echo $$$$ > .run/api.pid; cd web/api && exec ./.venv/bin/uvicorn main:app --reload --port 8068' > .run/api.log 2>&1 &

@@ -7,7 +7,10 @@ receives aggregate JSON. All data logic lives in firefly_client.py.
 Run (dev):  uvicorn main:app --reload --port 8068   (from web/api/)
 """
 
+import calendar
+import math
 import os
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -16,8 +19,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
+import auth
 import alerts as alerts_mod
 import amortization
+import budget
+import cycle
+import finance_alerts
 import drift
 import firefly_client as fc
 import import_status
@@ -37,7 +44,10 @@ STRATEGY_EXAMPLE = CONFIG_DIR / "strategy.example.yaml"
 DATA_DIR = Path(os.environ.get("NORA_DATA_DIR", REPO_ROOT / "data"))
 AUTO_SYNC_LOG = DATA_DIR / "auto_sync.log"
 
-app = FastAPI(title="NORA API")
+app = FastAPI(title="NORA API", lifespan=auth.lifespan)
+
+# Jeton d'accès ajouté AVANT CORS : CORS reste le plus externe (les 401 portent ses en-têtes).
+app.middleware("http")(auth.require_token)
 
 # Dev only: Vite dev server hits us cross-origin. In prod, nginx serves same-origin.
 app.add_middleware(
@@ -165,6 +175,273 @@ def api_categorization(month: str | None = None):
     cov = categorization.coverage(cats)
     top = categorization.top_untagged(fc.untagged_withdrawals(month), 5)
     return {"month": month, **cov, "top_untagged": top}
+
+
+# ── cycle de paie, enveloppes, alertes de dérapage, classement ───────────────
+
+STALE_AFTER = timedelta(hours=48)
+
+
+def _today():
+    return date.today()
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(ts):
+    try:
+        t = datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+OK_EVENT = "import_completed"
+
+
+def sync_state(sources=None):
+    """(dernier import réussi, échec connu). Avec `sources` : réussite la plus ancienne
+    parmi elles, et échec si l'une est absente ou en échec à son dernier événement.
+    Sans : réussite la plus récente, échec si une source quelconque est en échec."""
+    text = AUTO_SYNC_LOG.read_text() if AUTO_SYNC_LOG.exists() else ""
+    latest = import_status.last_per_source(text)
+    if sources:
+        ok = import_status.last_per_source(text, OK_EVENT)
+        failed = any(latest.get(s, {}).get("event") != OK_EVENT for s in sources)
+        ts = [(_parse_ts(ok[s]["timestamp"]), ok[s]["timestamp"]) for s in sources if s in ok]
+        if len(ts) < len(sources) or any(t is None for t, _ in ts):
+            return None, True
+        return min(ts)[1], failed
+    failed = any(v.get("event") != OK_EVENT for v in latest.values())
+    ok = [(t, v["timestamp"]) for v in latest.values()
+          if v.get("event") == OK_EVENT and (t := _parse_ts(v.get("timestamp")))]
+    return (max(ok)[1] if ok else None), failed
+
+
+def _stale(ts):
+    t = _parse_ts(ts)
+    return t is None or _now() - t > STALE_AFTER
+
+
+def _budget_cfg(cfg):
+    b = cfg.get("budget")
+    if not b:
+        raise HTTPException(503, "Bloc « budget » absent de la configuration : "
+                                 "cycle, enveloppes et alertes indisponibles.")
+    return b
+
+
+def _balance(name):
+    bal = fc.account_balance(name)
+    if bal is None:
+        raise HTTPException(503, f"Compte « {name} » introuvable dans le registre.")
+    return bal
+
+
+def _current_cycle(b, today):
+    """(paie, début, fin) ; une paie dont le cycle est déjà clos (paie en retard,
+    synchro ancienne) est traitée comme non reconnue : cycle = mois calendaire."""
+    window = cycle.PAY_WINDOW_DAYS + cycle.PAY_MIN_GAP_DAYS
+    recent = [d for d in cycle.pay_dates(fc.incomes_since(window), b["pay"])
+              if 0 <= (today - d).days <= cycle.PAY_WINDOW_DAYS]
+    pay = max(recent, default=None)
+    start, end = cycle.cycle_bounds(today, pay)
+    if end < today:
+        pay = None
+        start, end = cycle.cycle_bounds(today, None)
+    return pay, start, end
+
+
+def _cycle_state(cfg):
+    b = _budget_cfg(cfg)
+    today = _today()
+    # coussin et comptes investis jamais comptés dans le disponible
+    cushion = b["cushion"]
+    excluded = {cushion["account"], *cfg.get("invested", {}).get("accounts", [])}
+    accounts = [a for a in b.get("accounts") or [] if a not in excluded]
+    if not accounts:
+        raise HTTPException(503, "Bloc budget.accounts absent ou vide : "
+                                 "aucun compte courant pour calculer le disponible.")
+    ex = {e.lower() for e in cfg.get("transfer_categories", [])}
+    charges = cfg.get("dormant", {}).get("recurring_charges", [])
+    postes = b.get("postes", [])
+
+    pay, start, end = _current_cycle(b, today)
+    ws = fc.withdrawals_between(start, today)
+    # charges fixes exclues comme dans l'historique : déjà comptées dans les charges
+    spending = [w for w in ws if w["category"].lower() not in ex
+                and not cycle.is_charge(w, charges)]
+    by_cat = {}
+    for w in spending:
+        if w["category"]:
+            by_cat[w["category"]] = by_cat.get(w["category"], 0) + w["amount"]
+    total = sum(w["amount"] for w in spending)
+    coverage = round(sum(by_cat.values()) / total, 4) if total else 1.0
+
+    history = fc.cycles_history(b.get("reference_cycles", 6), b["pay"], ex, charges)
+    rates = cycle.daily_rates(history)
+    balance = sum(_balance(a) for a in accounts)
+    charges_left = cycle.remaining_charges(charges, start, end, ws)
+    days_left = (end - today).days
+    avail = cycle.available(balance, charges_left, rates, days_left, b.get("margin_eur", 0))
+
+    cushion_bal = _balance(cushion["account"])
+    m = budget.mode(cushion_bal, cushion["floor_eur"])
+    env = budget.envelopes(rates, (end - start).days + 1, postes, m)
+    spent = budget.spent_in_cycle(by_cat, postes)
+    ts, sync_failed = sync_state(b.get("sync_sources"))
+    consent = _consent(b)
+    consent_expired = consent is not None and consent < today
+    return {
+        "cfg": b, "postes": postes, "today": today, "start": start, "end": end,
+        "days_left": days_left, "mode": m, "rates": rates, "avail": avail,
+        "charges_left": charges_left, "envelopes": env, "spent": spent,
+        "cushion_balance": cushion_bal, "ws": ws, "charges": charges,
+        "quality": cycle.quality(len(history), coverage, pay is not None),
+        "basis": {"pay_date": pay.isoformat() if pay else None,
+                  "complete_cycles": len(history),
+                  "reference_period": [_iso(history[0]["start"]), _iso(
+                      history[-1]["start"] + timedelta(days=history[-1]["days"] - 1))]
+                  if history else None,
+                  "coverage": coverage},
+        "last_sync": ts, "consent": consent, "consent_expired": consent_expired,
+        "stale": _stale(ts) or sync_failed or consent_expired,
+    }
+
+
+def _consent(b):
+    c = b.get("consent_expires")
+    return date.fromisoformat(c) if isinstance(c, str) else c
+
+
+def _iso(d):
+    return d.isoformat() if d else None
+
+
+def _meta(st):
+    return {"quality": st["quality"], "stale": st["stale"], "last_sync": st["last_sync"],
+            "consent_expired": st["consent_expired"], "basis": st["basis"]}
+
+
+def _amount(amount):
+    if not math.isfinite(amount) or amount <= 0:
+        raise HTTPException(422, "Le montant doit être un nombre fini strictement positif.")
+    return amount
+
+
+def _poste(postes, poste):
+    names = [p["name"] for p in postes]
+    if poste not in names:
+        raise HTTPException(422, f"Poste inconnu « {poste} ». Postes valides : {', '.join(names)}.")
+    return next(p for p in postes if p["name"] == poste)
+
+
+@app.get("/api/cycle")
+def api_cycle():
+    st = _cycle_state(load_cfg())
+    return {
+        "start": st["start"].isoformat(), "end": st["end"].isoformat(),
+        "today": st["today"].isoformat(), "days_left": st["days_left"], "mode": st["mode"],
+        **_meta(st), "available": st["avail"],
+        "charges_left": [{**c, "due": _iso(c["due"])} for c in st["charges_left"]],
+        "envelopes": st["envelopes"], "spent": st["spent"],
+        "cushion": {"balance": st["cushion_balance"], "floor": st["cfg"]["cushion"]["floor_eur"]},
+    }
+
+
+@app.get("/api/cycle/afford")
+def api_cycle_afford(amount: float, poste: str | None = None):
+    _amount(amount)
+    cfg = load_cfg()
+    if poste is not None:
+        _poste(_budget_cfg(cfg).get("postes", []), poste)
+    st = _cycle_state(cfg)
+    left = {k: round(v - st["spent"].get(k, 0), 2) for k, v in st["envelopes"].items()}
+    # la dépense d'un poste puise d'abord dans ce que le disponible réserve déjà pour lui
+    cat = next((p["category"] for p in st["postes"] if p["name"] == poste), None)
+    used = round(min(amount, st["avail"]["variable_expected"].get(cat, 0)), 2)
+    avail = {**st["avail"], "available": round(st["avail"]["available"] + used, 2)}
+    return {**budget.can_afford(avail, amount, poste, st["mode"], left, st["postes"]),
+            "available": st["avail"]["available"], "reserve_used": used, **_meta(st)}
+
+
+@app.get("/api/cycle/save")
+def api_cycle_save(amount: float):
+    _amount(amount)
+    st = _cycle_state(load_cfg())
+    return {**budget.can_save(st["avail"], amount), "available": st["avail"]["available"],
+            **_meta(st)}
+
+
+@app.get("/api/envelopes")
+def api_envelopes():
+    st = _cycle_state(load_cfg())
+    nxt = st["end"] + timedelta(days=1)
+    days = calendar.monthrange(nxt.year, nxt.month)[1]
+    return {"days": days, "mode": st["mode"],
+            "envelopes": budget.envelopes(st["rates"], days, st["postes"], st["mode"]),
+            **_meta(st)}
+
+
+@app.get("/api/finance-alerts")
+def api_finance_alerts():
+    st = _cycle_state(load_cfg())
+    b, today = st["cfg"], st["today"]
+    cushion = b["cushion"]
+    # épargne mensuelle du coussin estimée sur trois mois
+    before = fc.account_balance(cushion["account"], today - timedelta(days=91))
+    monthly = (st["cushion_balance"] - before) / 3 if before is not None else 0
+    eta = budget.ceiling_eta(st["cushion_balance"], cushion["ceiling_eur"], monthly) \
+        if cushion.get("ceiling_eur") else None
+    unexpected = [w for w in st["ws"]
+                  if not w["category"] and not cycle.is_charge(w, st["charges"])]
+    return {"alerts": finance_alerts.build(
+        st["start"], st["avail"], st["envelopes"], st["spent"], st["postes"], unexpected,
+        st["consent"], today, eta, cushion.get("warn_months", 3),
+        unexpected_min=b.get("unexpected_min_eur", 100.0)), **_meta(st)}
+
+
+UNCLASSIFIED_MAX = 20
+
+
+@app.get("/api/unclassified")
+def api_unclassified():
+    cfg = load_cfg()
+    b = _budget_cfg(cfg)
+    today = _today()
+    _, start, _ = _current_cycle(b, today)
+    charges = cfg.get("dormant", {}).get("recurring_charges", [])
+    ws = [w for w in fc.withdrawals_between(start, today) if not w["category"]
+          and w["amount"] > 0 and not cycle.is_charge(w, charges)]
+    ws.sort(key=lambda w: w["date"], reverse=True)
+    # le libellé est le champ que le déclencheur de règle inspecte
+    return [{"id": w["id"], "date": w["date"], "payee": finance_alerts._clean(
+                 " ".join(w["description"].split()) or w["payee"]),
+             "amount": w["amount"]} for w in ws[:UNCLASSIFIED_MAX]]
+
+
+class RuleBody(BaseModel):
+    payee: str
+    poste: str
+
+
+@app.post("/api/rules")
+def api_rules(body: RuleBody):
+    payee = body.payee.strip()
+    if not 3 <= len(payee) <= 100:
+        raise HTTPException(422, "Le payee doit compter entre 3 et 100 caractères.")
+    p = _poste(_budget_cfg(load_cfg()).get("postes", []), body.poste)
+    rule_id = fc.find_rule(payee)  # une seule règle de l'assistant par payee
+    created = rule_id is None
+    if created:
+        rule_id = fc.create_rule(payee, p["category"])
+    else:
+        # réécrite à chaque fois : catégorie à jour, strict + « sans catégorie » garantis
+        fc.update_rule(rule_id, payee, p["category"])
+    fc.trigger_rule(rule_id)
+    return {"rule_id": rule_id, "created": created, "applied": True}
 
 
 SNAPSHOTS_FILE = DATA_DIR / "snapshots.json"
