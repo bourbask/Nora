@@ -1,3 +1,4 @@
+# Gabarit nginx (substitution de NORA_API_TOKEN par l'image au démarrage).
 # nora-ui — sert le build statique (dist) et proxifie /api vers nora-api.
 # Même origine en prod : le navigateur ne voit jamais le token Firefly.
 server {
@@ -8,6 +9,8 @@ server {
     # /api/* -> backend interne (le préfixe /api est conservé, routes FastAPI sous /api).
     location /api/ {
         proxy_pass http://nora-api:8000;
+        # Jeton ajouté côté serveur : le navigateur ne le voit jamais.
+        proxy_set_header Authorization "Bearer ${NORA_API_TOKEN}";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }

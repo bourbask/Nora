@@ -123,7 +123,8 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(fc, "api_get", reg.get)
     monkeypatch.setattr(fc, "api_post", reg.post)
     monkeypatch.setattr(fc, "api_put", reg.put)
-    c = TestClient(main.app)
+    monkeypatch.setenv("NORA_API_TOKEN", "t")
+    c = TestClient(main.app, headers={"Authorization": "Bearer t"})
     c.registry, c.log = reg, log
     return c
 
@@ -365,6 +366,7 @@ def test_remaining_unchanged(monkeypatch):
     monkeypatch.setattr(fc, "typical_monthly_expense", lambda ref, months=6: 1600.0)
     monkeypatch.setattr(fc, "asset_accounts", lambda on_date=None: [
         {"name": k, "balance": v} for k, v in BALANCES.items()])
-    r = TestClient(main.app).get("/api/remaining")
+    monkeypatch.setenv("NORA_API_TOKEN", "t")
+    r = TestClient(main.app, headers={"Authorization": "Bearer t"}).get("/api/remaining")
     assert r.status_code == 200
     assert r.json() == REMAINING_SNAPSHOT

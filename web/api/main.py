@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
+import auth
 import alerts as alerts_mod
 import amortization
 import budget
@@ -43,7 +44,10 @@ STRATEGY_EXAMPLE = CONFIG_DIR / "strategy.example.yaml"
 DATA_DIR = Path(os.environ.get("NORA_DATA_DIR", REPO_ROOT / "data"))
 AUTO_SYNC_LOG = DATA_DIR / "auto_sync.log"
 
-app = FastAPI(title="NORA API")
+app = FastAPI(title="NORA API", lifespan=auth.lifespan)
+
+# Jeton d'accès ajouté AVANT CORS : CORS reste le plus externe (les 401 portent ses en-têtes).
+app.middleware("http")(auth.require_token)
 
 # Dev only: Vite dev server hits us cross-origin. In prod, nginx serves same-origin.
 app.add_middleware(

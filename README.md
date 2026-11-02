@@ -60,6 +60,11 @@ Run the dashboard — see [`web/README.md`](web/README.md).
 - `importer/config/config.json` — maps your account names to Firefly account IDs.
 - `providers/<name>/` — your per-institution converters + drop-folder.
 
+## Déploiement
+
+Après mise à jour : générer `NORA_API_TOKEN` (`openssl rand -hex 32`) dans `.env` AVANT de déployer, sinon l'API refuse de démarrer.
+Toutes les routes exigent `Authorization: Bearer <jeton>` sauf `GET /api/health` ; le proxy du tableau de bord l'ajoute côté serveur.
+
 ## Status
 
 MVP in progress: dashboard + dormant health score are live; flow/portfolio, invested
