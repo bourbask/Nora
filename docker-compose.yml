@@ -22,7 +22,8 @@ services:
     container_name: firefly-iii
     restart: unless-stopped
     ports:
-      - "8066:8080"
+      # bind localhost-only: never publish on 0.0.0.0 (public on a VPS). Local dev uses localhost:8066.
+      - "127.0.0.1:8066:8080"
     volumes:
       - ./firefly-iii/oauth-private.key:/var/www/html/storage/oauth-private.key
       - ./firefly-iii/oauth-public.key:/var/www/html/storage/oauth-public.key
@@ -50,7 +51,8 @@ services:
     container_name: firefly-iii-importer
     restart: unless-stopped
     ports:
-      - "8067:8080"
+      # bind localhost-only: never publish on 0.0.0.0 (public on a VPS).
+      - "127.0.0.1:8067:8080"
     environment:
       - FIREFLY_III_URL=http://firefly-iii:8080
       - FIREFLY_III_ACCESS_TOKEN=${FIREFLY_III_ACCESS_TOKEN}

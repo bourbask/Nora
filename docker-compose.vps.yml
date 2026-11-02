@@ -1,0 +1,60 @@
+# Overlay serveur (réseau privé uniquement) — à utiliser AVEC le compose de base :
+#   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d
+#
+# Objectif (§3.3, §5 du design) :
+#   - tous les services rejoignent le réseau `nora-net` (partagé avec n8n) ;
+#   - SEULE l'UI est publiée, sur la boucle locale, exposée au réseau privé par l'hôte ;
+#   - l'API reste INTERNE (aucun port publié), joignable via `nora-api:8000` ;
+#   - postgres / firefly / importer ne sont PAS exposés par cet overlay.
+services:
+  # --- services de base rattachés à nora-net (en plus de firefly-net) ---
+  postgres:
+    networks: [firefly-net, nora-net]
+
+  firefly-iii:
+    networks: [firefly-net, nora-net]
+
+  data-importer:
+    networks: [firefly-net, nora-net]
+
+  # --- API Nora : interne, jamais publiée. DNS = nora-api sur nora-net. ---
+  nora-api:
+    image: python:3.12-slim
+    container_name: nora-api
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./web/api:/app:ro
+      - ./config:/config:ro
+      - ./data:/data:ro
+    environment:
+      - NORA_CONFIG_DIR=/config
+      - NORA_DATA_DIR=/data
+      - FIREFLY_BASE_URL=http://firefly-iii:8080
+      - FIREFLY_III_ACCESS_TOKEN=${FIREFLY_III_ACCESS_TOKEN}
+    # ponytail: installe les deps au boot (pas de Dockerfile). Ajouter web/api/Dockerfile si le temps de démarrage compte.
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      firefly-iii:
+        condition: service_started
+    networks: [firefly-net, nora-net]
+
+  # --- UI Nora : nginx sert dist + proxifie /api. Seul service publié. ---
+  nora-ui:
+    image: nginx:1.27-alpine
+    container_name: nora-ui
+    restart: unless-stopped
+    volumes:
+      - ./web/ui/dist:/usr/share/nginx/html:ro
+      - ./deploy/nora-ui.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      # Boucle locale uniquement ; l'exposition au réseau privé est faite par l'hôte.
+      - "127.0.0.1:49173:80"
+    depends_on:
+      - nora-api
+    networks: [nora-net]
+
+networks:
+  # Réseau partagé Nora <-> n8n. Créé ici (propriétaire) ; n8n le référence en external.
+  nora-net:
+    name: nora-net
