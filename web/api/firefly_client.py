@@ -410,7 +410,8 @@ def update_rule(rule_id, payee, category):
 def trigger_rule(rule_id, days=400):
     """Applique la règle aux opérations des `days` derniers jours."""
     today = date.today()
-    api_post(f"/rules/{rule_id}/trigger", None, params={
+    # Corps JSON vide : Firefly refuse (415) un POST sans type de contenu.
+    api_post(f"/rules/{rule_id}/trigger", {}, params={
         "start": (today - timedelta(days=days)).isoformat(), "end": today.isoformat()})
 
 
