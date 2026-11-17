@@ -41,6 +41,20 @@ consolidation NORA.
 - ⏳ Phase 2 : Sankey + portefeuille au coût + score investi.
 - ⏳ Phase 3 : formulaires stratégie (`GET/PUT /api/strategy`).
 
+## Classement des dépenses
+
+- `GET /api/categories` → `{categories: [{name, budget, poste}]}` : catégories du registre et
+  des postes du budget (`budget` vrai, `poste` = nom du poste), postes en tête ; catégories de
+  virement exclues.
+- `GET /api/categories/suggest?payee=…&payee=…&n=4` → `{suggestions: [{payee, categories, matched}]}` :
+  catégories probables par commerçant. D'abord celles de ses opérations déjà classées sur un an
+  (motif contenu dans le libellé ou le tiers), par nombre puis récence ; ensuite les plus utilisées
+  de l'historique, enfin les autres catégories. `matched` = nombre venant du commerçant lui-même.
+- `POST /api/rules` `{payee, poste}` (inchangé) ou `{payee, category, create?}` : n'importe quelle
+  catégorie. Nom nettoyé (contrôles et invisibles retirés, espaces réduites), 1 à 60 caractères ;
+  une catégorie existante à la casse près est réutilisée ; une inconnue n'est créée qu'avec
+  `create: true`. La réponse ajoute alors `category` et `category_created`.
+
 ## Vérifs
 
 ```sh

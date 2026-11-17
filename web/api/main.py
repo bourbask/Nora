@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
@@ -427,9 +427,70 @@ def api_unclassified():
              "amount": w["amount"]} for w in ws[:UNCLASSIFIED_MAX]]
 
 
+SUGGEST_DAYS = 365
+SUGGEST_MAX = 10
+SUGGEST_PAYEES_MAX = 50
+
+
+def _categories(cfg):
+    """Catégories du registre et des postes du budget (marqués), postes en tête puis
+    ordre alphabétique ; catégories de virement exclues."""
+    ex = {e.lower() for e in cfg.get("transfer_categories", [])}
+    postes = {p["category"].casefold(): p["name"] for p in (cfg.get("budget") or {}).get("postes", [])}
+    names = {}
+    for n in fc.categories() + [p["category"] for p in (cfg.get("budget") or {}).get("postes", [])]:
+        names.setdefault(n.casefold(), n)
+    out = [{"name": n, "budget": k in postes, "poste": postes.get(k)}
+           for k, n in names.items() if n.lower() not in ex]
+    out.sort(key=lambda c: (not c["budget"], c["name"].casefold()))
+    return out
+
+
+@app.get("/api/categories")
+def api_categories():
+    return {"categories": _categories(load_cfg())}
+
+
+@app.get("/api/categories/suggest")
+def api_categories_suggest(payee: list[str] = Query(), n: int = 4):
+    if not 1 <= n <= SUGGEST_MAX:
+        raise HTTPException(422, f"n doit être compris entre 1 et {SUGGEST_MAX}.")
+    if len(payee) > SUGGEST_PAYEES_MAX or any(not 1 <= len(p.strip()) <= 100 for p in payee):
+        raise HTTPException(422, f"Entre 1 et {SUGGEST_PAYEES_MAX} payees de 1 à 100 caractères.")
+    cats = [c["name"] for c in _categories(load_cfg())]
+    today = _today()
+    history = [w for w in fc.withdrawals_between(today - timedelta(days=SUGGEST_DAYS), today)
+               if w["category"]]
+    out = []
+    for p in payee:
+        ranked, matched = categorization.suggest(p.strip(), history, cats, n)
+        out.append({"payee": p.strip(), "categories": ranked, "matched": matched})
+    return {"suggestions": out}
+
+
 class RuleBody(BaseModel):
     payee: str
-    poste: str
+    poste: str | None = None
+    category: str | None = None
+    create: bool = False
+
+
+def _category(cfg, raw, create):
+    """(nom exact de la catégorie, créée ?) ; une catégorie existante, à la casse près,
+    n'est jamais dupliquée."""
+    name = categorization.clean_name(raw)
+    if name is None:
+        raise HTTPException(422, "Le nom de catégorie doit compter entre 1 et "
+                                 f"{categorization.NAME_MAX} caractères.")
+    postes = (cfg.get("budget") or {}).get("postes", [])
+    known = next((n for n in fc.categories() + [p["category"] for p in postes]
+                  if n.casefold() == name.casefold()), None)
+    if known is not None:
+        return known, False
+    if not create:
+        raise HTTPException(422, f"Catégorie inconnue « {name} » : la créer explicitement.")
+    fc.create_category(name)
+    return name, True
 
 
 @app.post("/api/rules")
@@ -437,16 +498,24 @@ def api_rules(body: RuleBody):
     payee = body.payee.strip()
     if not 3 <= len(payee) <= 100:
         raise HTTPException(422, "Le payee doit compter entre 3 et 100 caractères.")
-    p = _poste(_budget_cfg(load_cfg()).get("postes", []), body.poste)
+    if (body.poste is None) == (body.category is None):
+        raise HTTPException(422, "Indiquer un poste ou une catégorie, pas les deux.")
+    cfg = load_cfg()
+    extra = {}
+    if body.poste is not None:
+        category = _poste(_budget_cfg(cfg).get("postes", []), body.poste)["category"]
+    else:
+        category, made = _category(cfg, body.category, body.create)
+        extra = {"category": category, "category_created": made}
     rule_id = fc.find_rule(payee)  # une seule règle de l'assistant par payee
     created = rule_id is None
     if created:
-        rule_id = fc.create_rule(payee, p["category"])
+        rule_id = fc.create_rule(payee, category)
     else:
         # réécrite à chaque fois : catégorie à jour, strict + « sans catégorie » garantis
-        fc.update_rule(rule_id, payee, p["category"])
+        fc.update_rule(rule_id, payee, category)
     fc.trigger_rule(rule_id)
-    return {"rule_id": rule_id, "created": created, "applied": True}
+    return {"rule_id": rule_id, "created": created, "applied": True, **extra}
 
 
 SNAPSHOTS_FILE = DATA_DIR / "snapshots.json"
