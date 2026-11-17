@@ -78,11 +78,14 @@ class FakeRegistry:
 
     def __init__(self):
         self.groups, self.rules, self.triggered, self.puts = [], [], [], []
+        self.categories = ["Courses", "Santé", "Logement", "Virements"]
 
     def get(self, path, params=None):
         # pas de liste globale des règles : seul le groupe dédié est lisible
         if path == "/rule-groups":
             items = self.groups
+        elif path == "/categories":
+            items = [{"id": str(i), "attributes": {"name": n}} for i, n in enumerate(self.categories)]
         else:
             gid = path.split("/")[2]
             assert path == f"/rule-groups/{gid}/rules"
@@ -94,6 +97,9 @@ class FakeRegistry:
             g = {"id": str(len(self.groups) + 1), "attributes": {"title": data["title"]}}
             self.groups.append(g)
             return {"data": g}
+        if path == "/categories":
+            self.categories.append(data["name"])
+            return {"data": {"id": str(len(self.categories)), "attributes": data}}
         if path == "/rules":
             r = {"id": str(len(self.rules) + 1), "attributes": data}
             self.rules.append(r)
@@ -481,3 +487,60 @@ def test_uncategorized_history_makes_quality_uncertain(client, monkeypatch):
     assert j["basis"]["coverage"] >= cycle.MIN_COVERAGE
     assert j["basis"]["history_coverage"] == round(1 - 2000 / 3086, 4)
     assert j["quality"] == "incertaine"
+
+
+def test_categories_lists_registry_and_postes_marked(client):
+    j = client.get("/api/categories").json()["categories"]
+    assert j == [
+        {"name": "Carburant", "budget": True, "poste": "essence"},
+        {"name": "Courses", "budget": True, "poste": "courses"},
+        {"name": "Restaurants", "budget": True, "poste": "restos"},
+        {"name": "Logement", "budget": False, "poste": None},
+        {"name": "Santé", "budget": False, "poste": None}]
+
+
+def test_suggest_from_merchant_history(client):
+    r = client.get("/api/categories/suggest", params=[("payee", "station"), ("payee", "INCONNU")])
+    assert r.status_code == 200
+    s = r.json()["suggestions"]
+    # station : sa catégorie d'abord, puis les plus utilisées ; virements jamais proposés
+    assert s[0] == {"payee": "station", "categories": ["Carburant", "Logement", "Courses", "Santé"],
+                    "matched": 1}
+    assert s[1]["matched"] == 0 and s[1]["categories"][3] == "Santé"
+    assert sorted(s[1]["categories"][:3]) == ["Carburant", "Courses", "Logement"]
+
+
+@pytest.mark.parametrize("q", [[("payee", "x"), ("n", "0")], [("payee", "x"), ("n", "11")],
+                               [("payee", " ")], [], [("payee", "x")] * 51])
+def test_suggest_rejects_bad_input(client, q):
+    assert client.get("/api/categories/suggest", params=q).status_code == 422
+
+
+def test_rule_to_any_existing_category(client):
+    j = client.post("/api/rules", json={"payee": "PHARMACIE", "category": " santé "}).json()
+    assert j["created"] is True and j["category"] == "Santé" and j["category_created"] is False
+    reg = client.registry
+    assert reg.rules[0]["attributes"]["actions"][0]["value"] == "Santé"
+    assert reg.categories == ["Courses", "Santé", "Logement", "Virements"]
+
+
+def test_rule_creates_category_only_when_asked(client):
+    body = {"payee": "COMMERCE A", "category": "  Cadeaux​  "}
+    r = client.post("/api/rules", json=body)
+    assert r.status_code == 422 and client.registry.rules == []
+    j = client.post("/api/rules", json={**body, "create": True}).json()
+    assert j["category"] == "Cadeaux" and j["category_created"] is True
+    assert client.registry.categories[-1] == "Cadeaux"
+    # même nom, autre casse : réutilisée, jamais dupliquée
+    j = client.post("/api/rules", json={"payee": "COMMERCE A", "category": "CADEAUX", "create": True}).json()
+    assert j["category"] == "Cadeaux" and j["category_created"] is False
+    assert client.registry.categories.count("Cadeaux") == 1
+
+
+@pytest.mark.parametrize("body", [{"payee": "MAGASIN", "category": "  ", "create": True},
+                                  {"payee": "MAGASIN", "category": "x" * 61, "create": True},
+                                  {"payee": "MAGASIN", "poste": "courses", "category": "Santé"},
+                                  {"payee": "MAGASIN"}])
+def test_rule_category_rejects_bad_input(client, body):
+    assert client.post("/api/rules", json=body).status_code == 422
+    assert client.registry.rules == [] and len(client.registry.categories) == 4

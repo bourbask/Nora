@@ -355,6 +355,15 @@ def account_balance(name, on_date=None):
     return next((a["balance"] for a in asset_accounts(on_date) if a["name"] == name), None)
 
 
+def categories():
+    """Noms des catégories du registre."""
+    return [c["attributes"]["name"] for c in _pages("/categories")]
+
+
+def create_category(name):
+    api_post("/categories", {"name": name})
+
+
 RULE_GROUP = "Classement assistant"
 # Le libellé contient toujours la contrepartie (les deux types d'import).
 RULE_TRIGGER = "description_contains"
